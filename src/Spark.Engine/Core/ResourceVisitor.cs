@@ -23,6 +23,26 @@ namespace Spark.Engine.Core
             throw new NotImplementedException("Should be implemented to replace Auxiliary.ResourceVisitor.");
         }
 
+        private const string indexerPattern = @"(\[[0-9]+])";
+        private const string numberPattern = @"([0-9]+)";
+        private bool IsIndexed(string path)
+        {
+            return Regex.IsMatch(path, indexerPattern);
+        }
+        private int? GetIndexerValue(string path)
+        {
+            int? index = null;
+            Match match = Regex.Match(path, indexerPattern);
+            if (match.Success)
+            {
+                match = Regex.Match(match.Value, numberPattern);
+                if (match.Success)
+                    if (int.TryParse(match.Value, out int result))
+                        index = result;
+            }
+            return index;
+        }
+
         /// <summary>
         /// Walk through an object, following the specified path of properties.
         /// The path should NOT include the name of the resource itself (e.g. "Patient.birthdate" is wrong, "birthdate" is right).
@@ -67,6 +87,13 @@ namespace Spark.Engine.Core
 
                         if (headValue != null)
                         {
+                            // If the Head part of the path has an indexer value then we just want to retrieve the element at that index.
+                            int? index = GetIndexerValue(head);
+                            if (index.HasValue)
+                            {
+                                if (headValue is IEnumerable<Base> headValues)
+                                    headValue = headValues.ElementAt(index.Value);
+                            }
                             VisitByPath(headValue, action, tail, headPredicate);
                         }
                     }
@@ -98,7 +125,8 @@ namespace Spark.Engine.Core
         ///     a(x=y).b.c  => "a"      | "x=y"         | "b.c"
         /// See also ResourceVisitorTests.
         /// </summary>
-        private Regex headTailRegex = new Regex(@"(?([^\.]*\[.*\])(?<head>[^\[]*)\[(?<predicate>.*)\](\.(?<tail>.*))?|(?<head>[^\.]*)(\.(?<tail>.*))?)");
+        //private Regex headTailRegex = new Regex(@"(?([^\.]*\[.*\])(?<head>[^\[]*)\[(?<predicate>.*)\](\.(?<tail>.*))?|(?<head>[^\.]*)(\.(?<tail>.*))?)");
+        private Regex headTailRegex = new Regex(@"(?([^\.]*\(.*\))(?<head>[^\(]*)\((?<predicate>.*)\)(\.(?<tail>.*))?|(?<head>[^\.]*)(\.(?<tail>.*))?)");
 
         private Tuple<string, string, string> headPredicateAndTail(string path)
         {

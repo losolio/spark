@@ -134,10 +134,14 @@ namespace Spark.Engine.Service.FhirServiceExtensions
                         _resourceVisitor.VisitByPath(resource,
                             obj => 
                             {
-                                if (obj is Element)
-                                {
-                                    newIndexPart.Values.AddRange(_elementIndexer.Map(obj as Element));
-                                }
+                                Element element;
+                                if (par.Type == Hl7.Fhir.Model.SearchParamType.Reference && obj is Resource res)
+                                    element = new ResourceReference($"{res.TypeName}/{res.IdElement}");
+                                else
+                                    element = obj as Element;
+
+                                if (element != null)
+                                    newIndexPart.Values.AddRange(_elementIndexer.Map(element));
                             }
                             , path);
                     if (newIndexPart.Values.Any())

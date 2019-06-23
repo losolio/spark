@@ -18,6 +18,7 @@ namespace Spark.Engine.Test.Core
 
         //new version, with (x=y) as predicate (so with round brackets instead of square brackets.
         private Regex headTailRegex = new Regex(@"(?([^\.]*\(.*\))(?<head>[^\(]*)\((?<predicate>.*)\)(\.(?<tail>.*))?|(?<head>[^\.]*)(\.(?<tail>.*))?)");
+                                               //"(?([^\.]*\[.*\])(?<head>[^\[]*)\[(?<predicate>.*)\](\.(?<tail>.*))?|(?<head>[^\.]*)(\.(?<tail>.*))?)"
 
         [TestMethod]
         public void TestHeadNoTail()
@@ -57,6 +58,37 @@ namespace Spark.Engine.Test.Core
             Assert.AreEqual("a", match.Groups["head"].Value);
             Assert.AreEqual("", match.Groups["predicate"].Value);
             Assert.AreEqual("b.c", match.Groups["tail"].Value);
+        }
+
+        [TestMethod]
+        public void TestHeadAndTailOfIndexPropertyNoPredicate()
+        {
+            var test = "a.b[0].c";
+            var match = headTailRegex.Match(test);
+            Assert.AreEqual("a", match.Groups["head"].Value);
+            Assert.AreEqual("", match.Groups["predicate"].Value);
+            Assert.AreEqual("b[0].c", match.Groups["tail"].Value);
+        }
+
+        [TestMethod]
+        public void TestHeadWithIndexAndTailNoPredicate()
+        {
+            var test = "a[0].c";
+            var match = headTailRegex.Match(test);
+            Assert.AreEqual("a[0]", match.Groups["head"].Value);
+            Assert.AreEqual("", match.Groups["predicate"].Value);
+            Assert.AreEqual("c", match.Groups["tail"].Value);
+        }
+
+        //"entry[0].resource"
+        [TestMethod]
+        public void TestHeadWithIndexAndTailNoPredicate2()
+        {
+            var test = "entry[0].resource";
+            var match = headTailRegex.Match(test);
+            Assert.AreEqual("entry[0]", match.Groups["head"].Value);
+            Assert.AreEqual("", match.Groups["predicate"].Value);
+            Assert.AreEqual("resource", match.Groups["tail"].Value);
         }
 
         [TestMethod]

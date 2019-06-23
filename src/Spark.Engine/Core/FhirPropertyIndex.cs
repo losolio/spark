@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace Spark.Engine.Core
@@ -98,6 +99,10 @@ namespace Spark.Engine.Core
         /// <returns><see cref="FhirPropertyInfo"/> for the specified property. Null if not present.</returns>
         public FhirPropertyInfo findPropertyInfo(Type fhirType, string propertyName)
         {
+            string pattern = @"(\[[0-9]+])";
+            if(Regex.IsMatch(propertyName, pattern))
+                propertyName = Regex.Replace(propertyName, pattern, string.Empty);
+
             FhirPropertyInfo propertyInfo = null;
             if (fhirType.IsGenericType)
             {
