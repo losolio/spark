@@ -59,6 +59,8 @@ namespace Spark.Web
                 app.UseHsts();
             }
             
+            app.UseStaticFiles();
+            
             // app.UseHttpsRedirection();
             app.UseCors();
             // UseFhir also calls UseMvc
