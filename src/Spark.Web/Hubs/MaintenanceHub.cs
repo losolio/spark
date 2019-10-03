@@ -15,7 +15,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Hosting;
 using System.IO;
 
-namespace Sparkur.Hubs
+namespace Spark.Web.Hubs
 {
 	[Authorize(Policy = "RequireAdministratorRole")]
 	public class MaintenanceHub : Hub

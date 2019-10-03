@@ -16,7 +16,7 @@ using Spark.Web.Data;
 using Spark.Web.Models;
 using Spark.Web.Models.Config;
 using Spark.Web.Services;
-using Sparkur.Hubs;
+using Spark.Web.Hubs;
 
 namespace Spark.Web
 {
