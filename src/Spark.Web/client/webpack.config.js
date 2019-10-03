@@ -1,7 +1,7 @@
 const path = require('path');
 const webpack = require('webpack');
 
-const options = {
+const publicjs = {
   entry: {
     main: './js/main.js'  // multiple entries can be added here
   },
@@ -29,4 +29,31 @@ if (process.env.NODE_ENV === 'development') {
   options['devtool'] = 'inline-source-map';
 }
 
-module.exports = options;
+const adminjs = {
+  entry: {
+    main: './js/admin.js'  // multiple entries can be added here
+  },
+  output: {
+    path: path.resolve('../wwwroot/assets/js/'),
+    filename: 'admin.js'  // based on entry name, e.g. main.js
+  },
+  module: {
+  },
+  externals: {
+    //gettext: 'gettext',
+  }
+}
+
+/*
+  If a project requires internationalisation, then include `gettext` in base.html
+    via the Django JSi18n helper, and uncomment it from the 'externals' object above.
+*/
+
+
+if (process.env.NODE_ENV === 'development') {
+  // Create JS source maps in the dev mode
+  // See https://webpack.js.org/configuration/devtool/ for more options
+  options['devtool'] = 'inline-source-map';
+}
+
+module.exports = [publicjs, adminjs];
