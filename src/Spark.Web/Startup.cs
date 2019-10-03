@@ -35,6 +35,8 @@ namespace Spark.Web
             // Bind to Spark and store settings from appSettings.json
             SparkSettings sparkSettings = new SparkSettings();
             Configuration.Bind("SparkSettings", sparkSettings);
+            services.AddSingleton<SparkSettings>(sparkSettings);
+            
             StoreSettings storeSettings = new StoreSettings();
             Configuration.Bind("StoreSettings", storeSettings);
 
@@ -42,6 +44,7 @@ namespace Spark.Web
             ExamplesSettings examplesSettings = new ExamplesSettings();
             Configuration.Bind("ExamplesSettings", examplesSettings);
             services.Configure<ExamplesSettings>(options => Configuration.GetSection("ExamplesSettings").Bind(options));
+            services.AddSingleton<ExamplesSettings>(examplesSettings);
 
             // Configure cookie policy
             services.Configure<CookiePolicyOptions>(options =>

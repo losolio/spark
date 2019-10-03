@@ -18,4 +18,15 @@
     <ProjectReference Include="..\Spark.Mongo\Spark.Mongo.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="Examples\DSTU2\" CopyToOutputDirectory="Always" />
+    <Folder Include="Examples\R4\" CopyToOutputDirectory="Always" />
+    <Folder Include="Examples\STU3\" CopyToOutputDirectory="Always" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\Spark\Examples\DSTU2\examples.zip" Link="Examples\DSTU2\examples.zip" CopyToOutputDirectory="Always" />
+    <None Include="..\Spark\Examples\R4\examples.zip" Link="Examples\R4\examples.zip" CopyToOutputDirectory="Always" />
+    <None Include="..\Spark\Examples\STU3\examples.zip" Link="Examples\STU3\examples.zip" CopyToOutputDirectory="Always" />
+  </ItemGroup>
+
 </Project>
