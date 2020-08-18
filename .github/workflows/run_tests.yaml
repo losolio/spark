@@ -1,20 +1,6 @@
 ﻿name: Tests
 
-on:
-  push:
-    branches:
-      - '*'
-    tags-ignore:
-      - '*'
-    paths:
-      - 'src/**'
-  pull_request:
-    branches:
-      - '*'
-    tags-ignore:
-      - '*'
-    paths:
-      - 'src/**'
+on: [push, pull_request]
 
 jobs:
   build:
