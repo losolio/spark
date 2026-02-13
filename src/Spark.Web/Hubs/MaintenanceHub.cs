@@ -148,7 +148,7 @@ public class MaintenanceHub : Hub
                 catch (Exception e)
                 {
                     _logger.LogError(e, "Failed when loading example.");
-                    var msgError = $"ERROR Importing {res.TypeName.ToString()}, id {res.Id}...";
+                    var msgError = $"ERROR Importing {res.TypeName}, id {res.Id}: {e.Message}";
                     await _hubContext.Clients.All.SendAsync("UpdateProgress", msgError);
                 }
             }
