@@ -8,8 +8,8 @@ using Hl7.Fhir.Model;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
+using Spark.Core;
 using Spark.Engine.Core;
-using Spark.Engine.Extensions;
 using Spark.Engine.Interfaces;
 using Spark.Engine.Service;
 using Spark.Engine.Service.FhirServiceExtensions;
@@ -19,14 +19,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using Task = System.Threading.Tasks.Task;
 
 namespace Spark.Web.Hubs;
 
 [Authorize(Roles = "Admin")]
-public class MaintenanceHub : Hub<IMaintenanceHub>
+public class MaintenanceHub : Hub
 {
-    private List<Resource> _resources;
+    private List<Resource> _resources = null;
 
     private IFhirService _fhirService;
     private ILocalhost _localhost;
@@ -73,14 +72,14 @@ public class MaintenanceHub : Hub<IMaintenanceHub>
             {
                 if (entry.Resource != null)
                 {
-                    list.Add(entry.Resource);
+                    list.Add((Resource)entry.Resource);
                 }
             }
         }
         return list;
     }
 
-    public async Task ClearStore()
+    public async void ClearStore()
     {
         try
         {
@@ -96,26 +95,28 @@ public class MaintenanceHub : Hub<IMaintenanceHub>
             _logger.LogError(e, "Failed to clear store.");
             await _hubContext.Clients.All.SendAsync("UpdateProgress", $"ERROR CLEARING :(");
         }
+
     }
 
-    public async Task RebuildIndex()
+    public async void RebuildIndex()
     {
         try
         {
             await _hubContext.Clients.All.SendAsync("UpdateProgress", "Rebuilding index...");
             await _indexRebuildService.RebuildIndexAsync()
                 .ConfigureAwait(false);
-            await _hubContext.Clients.All.SendAsync("UpdateProgress", "Index rebuilt!");
         }
         catch (Exception e)
         {
             _logger.LogError(e, "Failed to rebuild index");
-            await _hubContext.Clients.All.SendAsync("UpdateProgress", "ERROR REBUILDING INDEX :(")
+
+            await _hubContext.Clients.All.SendAsync("UpdateProgress", "ERROR REBUILDING INDEX :( ")
                 .ConfigureAwait(false);
         }
+        await _hubContext.Clients.All.SendAsync("UpdateProgress", "Index rebuilt!");
     }
 
-    public async Task LoadExamplesToStore()
+    public async void LoadExamplesToStore()
     {
         try
         {
@@ -147,7 +148,7 @@ public class MaintenanceHub : Hub<IMaintenanceHub>
                 catch (Exception e)
                 {
                     _logger.LogError(e, "Failed when loading example.");
-                    var msgError = $"ERROR Importing {res.TypeName}, id {res.Id}...";
+                    var msgError = $"ERROR Importing {res.TypeName}, id {res.Id}: {e.Message}";
                     await _hubContext.Clients.All.SendAsync("UpdateProgress", msgError);
                 }
             }

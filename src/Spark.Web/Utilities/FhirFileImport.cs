@@ -46,8 +46,10 @@ internal static class FhirFileImport
             Bundle bundle = (resource as Bundle);
             return bundle.GetResources();
         }
-
-        return [resource];
+        else
+        {
+            return new Resource[] { resource };
+        }
     }
 
     public static IEnumerable<Resource> ImportFile(string filename)
