@@ -29,12 +29,9 @@ namespace Spark.Web;
 
 public class Startup
 {
-    private readonly ILogger<Startup> _logger;
-
-    public Startup(IConfiguration configuration, ILogger<Startup> logger)
+    public Startup(IConfiguration configuration)
     {
         Configuration = configuration;
-        _logger = logger;
     }
 
     public IConfiguration Configuration { get; }
@@ -93,6 +90,10 @@ public class Startup
         {
             options.LoginPath = "/api/auth/login";
             options.LogoutPath = "/api/auth/logout";
+            // Mark auth cookie as essential so it is not blocked by cookie consent,
+            // and configure SameSite/SecurePolicy appropriately for OAuth flows.
+            options.Cookie.IsEssential = true;
+            options.Cookie.SameSite = SameSiteMode.Lax;
         });
 
         if (gitHubEnabled)
@@ -171,8 +172,8 @@ public class Startup
         app.UseAuthentication();
         app.UseAuthorization();
 
-        // UseFhir registers the FHIR endpoints - must be before endpoint routing fallback
-        app.UseFhir(r => r.MapRoute(name: "default", template: "{controller}/{action}/{id?}", defaults: new { controller = "Home", action = "Index" }));
+        // UseFhir registers the FHIR API endpoints (attribute-routed only)
+        app.UseFhir();
 
         app.UseEndpoints(endpoints =>
         {

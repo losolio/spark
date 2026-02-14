@@ -6,6 +6,7 @@
 
 using Microsoft.AspNetCore;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace Spark.Web;
@@ -19,6 +20,10 @@ public class Program
 
     public static IWebHostBuilder CreateWebHostBuilder(string[] args) =>
         WebHost.CreateDefaultBuilder(args)
+            .ConfigureAppConfiguration((context, config) =>
+            {
+                config.AddJsonFile("Settings/appsettings.json", optional: false, reloadOnChange: true);
+            })
             .UseStartup<Startup>()
             .ConfigureLogging(logging =>
             {
