@@ -49,11 +49,16 @@ export function ResourcesPage() {
       batches.push(uncachedTypes.slice(i, i + batchSize))
     }
     
+    // Track timeouts and abort controller for cleanup
+    const timeoutIds: number[] = []
+    const abortController = new AbortController()
+    
     batches.forEach((batch, batchIndex) => {
-      setTimeout(() => {
+      const timeoutId = window.setTimeout(() => {
         batch.forEach((r) => {
           fetch(`/fhir/${r.resourceType}?_summary=count`, {
             headers: { Accept: 'application/fhir+json' },
+            signal: abortController.signal,
           })
             .then((res) => res.json())
             .then((bundle) => {
@@ -67,12 +72,22 @@ export function ResourcesPage() {
                 )
               )
             })
-            .catch(() => {
-              // Ignore count errors, leave as null
+            .catch((err) => {
+              // Ignore aborted requests and count errors
+              if (err.name !== 'AbortError') {
+                // Silently ignore count errors, leave as null
+              }
             })
         })
       }, batchIndex * 200) // Stagger batches by 200ms
+      timeoutIds.push(timeoutId)
     })
+    
+    // Cleanup function to cancel pending timeouts and abort in-flight requests
+    return () => {
+      timeoutIds.forEach(id => window.clearTimeout(id))
+      abortController.abort()
+    }
   }, [capability])
 
   const filteredResources = resources.filter((r) =>
