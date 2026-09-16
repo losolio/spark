@@ -18,4 +18,8 @@
         <ProjectReference Include="..\Spark.Engine\Spark.Engine.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+        <EmbeddedResource Include="Schema\*.sql" LogicalName="Schema/%(Filename)%(Extension)" />
+    </ItemGroup>
+
 </Project>

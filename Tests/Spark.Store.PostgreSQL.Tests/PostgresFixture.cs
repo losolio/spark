@@ -6,6 +6,7 @@
 
 using Npgsql;
 using Spark.Engine.Core;
+using Spark.Store.PostgreSQL.Schema;
 using System;
 using System.Threading.Tasks;
 using Testcontainers.PostgreSql;
@@ -14,8 +15,9 @@ using Xunit;
 namespace Spark.Store.PostgreSQL.Tests;
 
 /// <summary>
-/// One PostgreSQL container shared by all integration tests in the collection. Tests that need
-/// their own database call <see cref="CreateDatabaseAsync"/>.
+/// One PostgreSQL container shared by all integration tests in the collection. <see cref="DataSource"/>
+/// points at a database with the schema applied; tests call <see cref="ResetAsync"/> to start from
+/// empty tables, or <see cref="CreateDatabaseAsync"/> when they need a database without a schema.
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 public sealed class PostgresFixture : IAsyncLifetime
@@ -36,6 +38,7 @@ public sealed class PostgresFixture : IAsyncLifetime
             await _container.StartAsync(TestContext.Current.CancellationToken);
 
             DataSource = NpgsqlDataSource.Create(_container.GetConnectionString());
+            await PostgresSchema.EnsureCreatedAsync(DataSource, TestContext.Current.CancellationToken);
         }
         catch (Exception exception)
         {
@@ -55,6 +58,13 @@ public sealed class PostgresFixture : IAsyncLifetime
         {
             await _container.DisposeAsync();
         }
+    }
+
+    public async Task ResetAsync()
+    {
+        await using NpgsqlCommand command = DataSource.CreateCommand(
+            $"TRUNCATE TABLE {Table.Resources}, {Table.ResourceKeys}, {Table.Snapshots}, {Table.IndexQueue}, {Table.DatabaseMigrations} RESTART IDENTITY");
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
     /// <summary>
