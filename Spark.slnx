@@ -118,6 +118,7 @@
     <Project Path="Tests/Spark.Engine.STU3.Tests/Spark.Engine.STU3.Tests.csproj" />
     <Project Path="Tests/Spark.Engine.Tests/Spark.Engine.Tests.csproj" />
     <Project Path="Tests/Spark.Store.MongoDB.Tests/Spark.Store.MongoDB.Tests.csproj" />
+    <Project Path="Tests/Spark.Store.PostgreSQL.Tests/Spark.Store.PostgreSQL.Tests.csproj" />
     <Project Path="Tests/Spark.Web.R4.Tests/Spark.Web.R4.Tests.csproj" />
     <Project Path="Tests/Spark.Web.R4B.Tests/Spark.Web.R4B.Tests.csproj" />
     <Project Path="Tests/Spark.Web.R5.Tests/Spark.Web.R5.Tests.csproj" />
