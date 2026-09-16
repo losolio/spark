@@ -79,6 +79,7 @@
     <Project Path="Libraries/Spark.Engine.STU3/Spark.Engine.STU3.csproj" />
     <Project Path="Libraries/Spark.Engine/Spark.Engine.csproj" />
     <Project Path="Libraries/Spark.Store.MongoDB/Spark.Store.MongoDB.csproj" />
+    <Project Path="Libraries/Spark.Store.PostgreSQL/Spark.Store.PostgreSQL.csproj" />
   </Folder>
   <Folder Name="/Libraries/Spark.Engine.Shared/" />
   <Folder Name="/Libraries/Spark.Engine.Shared/Core/">
