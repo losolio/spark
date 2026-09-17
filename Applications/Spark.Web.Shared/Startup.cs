@@ -19,9 +19,11 @@ using Microsoft.OpenApi;
 using Spark.Engine;
 using Spark.Engine.Extensions;
 using Spark.Store.MongoDB.Extensions;
+using Spark.Store.PostgreSQL.Extensions;
 using Spark.Web.Hubs;
 using Spark.Web.Models.Config;
 using Spark.Web.Services;
+using System;
 using System.Linq;
 
 namespace Spark.Web;
@@ -120,8 +122,20 @@ public class Startup
                 policy.AllowAnyHeader();
             }));
 
-        // Sets up the MongoDB store
-        services.AddMongoFhirStore(storeSettings);
+        // Sets up the store selected by StoreSettings:Provider, MongoDB unless configured otherwise
+        string storeProvider = Configuration["StoreSettings:Provider"] ?? "MongoDB";
+        switch (storeProvider.ToLowerInvariant())
+        {
+            case "mongodb":
+                services.AddMongoFhirStore(storeSettings);
+                break;
+            case "postgresql":
+                services.AddPostgresFhirStore(storeSettings);
+                break;
+            default:
+                throw new InvalidOperationException(
+                    $"Unknown StoreSettings:Provider '{storeProvider}'. Supported providers are MongoDB and PostgreSQL.");
+        }
 
         services.AddFhirWithMvc(sparkSettings);
 

@@ -17,6 +17,7 @@
     <ProjectReference Include="..\..\Libraries\Spark.Engine\Spark.Engine.csproj" />
     <ProjectReference Include="..\..\Libraries\Spark.Engine.R6\Spark.Engine.R6.csproj" />
     <ProjectReference Include="..\..\Libraries\Spark.Store.MongoDB\Spark.Store.MongoDB.csproj" />
+    <ProjectReference Include="..\..\Libraries\Spark.Store.PostgreSQL\Spark.Store.PostgreSQL.csproj" />
   </ItemGroup>
 
   <ItemGroup>
