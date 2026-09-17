@@ -63,7 +63,9 @@ public sealed class PostgresFixture : IAsyncLifetime
     public async Task ResetAsync()
     {
         await using NpgsqlCommand command = DataSource.CreateCommand(
-            $"TRUNCATE TABLE {Table.Resources}, {Table.ResourceKeys}, {Table.Snapshots}, {Table.IndexQueue}, {Table.DatabaseMigrations} RESTART IDENTITY");
+            $"TRUNCATE TABLE {Table.Resources}, {Table.ResourceKeys}, {Table.Snapshots}, {Table.IndexQueue}, {Table.DatabaseMigrations}, " +
+            $"{Table.SearchParams}, {Table.SearchString}, {Table.SearchToken}, {Table.SearchDate}, {Table.SearchNumber}, " +
+            $"{Table.SearchQuantity}, {Table.SearchReference}, {Table.SearchUri} RESTART IDENTITY");
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

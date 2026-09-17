@@ -24,6 +24,14 @@ public class PostgresSchemaScriptTests
         Assert.Equal("0001_initial.sql", scripts[0].Name);
         Assert.Contains("CREATE TABLE IF NOT EXISTS resources", scripts[0].Sql);
     }
+
+    [Fact]
+    public void GetScripts_ReturnsScriptsInFileNameOrder()
+    {
+        IReadOnlyList<(string Name, string Sql)> scripts = PostgresSchema.GetScripts();
+
+        Assert.Equal(["0001_initial.sql", "0002_search_index.sql"], scripts.Select(script => script.Name));
+    }
 }
 
 [Collection("PostgreSQL integration")]
@@ -50,7 +58,16 @@ public class PostgresSchemaTests
         Assert.Contains(Table.Snapshots, tables);
         Assert.Contains(Table.IndexQueue, tables);
         Assert.Contains(Table.DatabaseMigrations, tables);
-        Assert.Equal(["0001_initial.sql"], await GetAppliedScriptsAsync(dataSource));
+        Assert.Contains(Table.SearchParams, tables);
+        Assert.Contains(Table.SearchString, tables);
+        Assert.Contains(Table.SearchToken, tables);
+        Assert.Contains(Table.SearchDate, tables);
+        Assert.Contains(Table.SearchNumber, tables);
+        Assert.Contains(Table.SearchQuantity, tables);
+        Assert.Contains(Table.SearchReference, tables);
+        Assert.Contains(Table.SearchUri, tables);
+        Assert.Contains("btree_gist", await ReadStringsAsync(dataSource, "SELECT extname::text FROM pg_extension"));
+        Assert.Equal(["0001_initial.sql", "0002_search_index.sql"], await GetAppliedScriptsAsync(dataSource));
     }
 
     [Fact]
@@ -61,7 +78,7 @@ public class PostgresSchemaTests
         await PostgresSchema.EnsureCreatedAsync(dataSource, TestContext.Current.CancellationToken);
         await PostgresSchema.EnsureCreatedAsync(dataSource, TestContext.Current.CancellationToken);
 
-        Assert.Equal(["0001_initial.sql"], await GetAppliedScriptsAsync(dataSource));
+        Assert.Equal(["0001_initial.sql", "0002_search_index.sql"], await GetAppliedScriptsAsync(dataSource));
     }
 
     [Fact]
@@ -74,7 +91,7 @@ public class PostgresSchemaTests
             .Select(_ => PostgresSchema.EnsureCreatedAsync(dataSource, TestContext.Current.CancellationToken));
         await Task.WhenAll(callers);
 
-        Assert.Equal(["0001_initial.sql"], await GetAppliedScriptsAsync(dataSource));
+        Assert.Equal(["0001_initial.sql", "0002_search_index.sql"], await GetAppliedScriptsAsync(dataSource));
     }
 
     private static async Task<List<string>> GetTablesAsync(NpgsqlDataSource dataSource)
