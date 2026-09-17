@@ -27,6 +27,12 @@ namespace Spark.Store.PostgreSQL.Search;
 /// </summary>
 internal sealed partial class SearchIndexRowMapper
 {
+    /// <summary>
+    /// Parameters that are answered from the resources table and are not worth a row in the search index:
+    /// _id from resource_keys and _lastUpdated from the updated time of the resource.
+    /// </summary>
+    private static readonly string[] NotIndexed = ["_id", "_lastUpdated"];
+
     private const string RootName = "root";
     private const string ContainedName = "contained";
     private const string InternalPrefix = "internal_";
@@ -54,6 +60,8 @@ internal sealed partial class SearchIndexRowMapper
         {
             // TODO: Contained resources are not indexed yet, see 0002_search_index.sql.
             if (parameter.Name == ContainedName || parameter.Name.StartsWith(InternalPrefix, StringComparison.Ordinal))
+                continue;
+            if (NotIndexed.Contains(parameter.Name, StringComparer.Ordinal))
                 continue;
 
             SearchParameter searchParameter = _fhirModel.FindSearchParameter(resourceType, parameter.Name);

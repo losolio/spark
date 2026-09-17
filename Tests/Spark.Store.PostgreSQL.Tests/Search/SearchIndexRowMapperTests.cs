@@ -98,7 +98,6 @@ public class SearchIndexRowMapperTests
 
         Assert.Contains(new TokenRow("gender", null, "female", null), rows.Tokens);
         Assert.Contains(new TokenRow("active", null, "true", null), rows.Tokens);
-        Assert.Contains(new TokenRow("_id", null, "p1", null), rows.Tokens);
     }
 
     [Fact]
@@ -275,6 +274,17 @@ public class SearchIndexRowMapperTests
         SearchIndexRows rows = await MapAsync(patient);
 
         Assert.DoesNotContain(rows.References, row => row.Param == "organization");
+    }
+
+    [Fact]
+    public async Task Map_SkipsParametersAnsweredFromTheResourcesTable()
+    {
+        Patient patient = new() { Meta = new Meta { LastUpdated = DateTimeOffset.UtcNow } };
+
+        SearchIndexRows rows = await MapAsync(patient, "p1");
+
+        // _id and _lastUpdated are searched in the resources table, so they are not worth a row each.
+        Assert.DoesNotContain(AllParams(rows), param => param is "_id" or "_lastUpdated");
     }
 
     [Fact]
