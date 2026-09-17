@@ -38,8 +38,8 @@ namespace Spark.Store.PostgreSQL;
 /// than ignored, since ignoring them would widen the result, for example making a conditional create match
 /// every resource of the type.
 /// </remarks>
-// TODO: Only searching by type, _id, _lastUpdated and token, string, reference and quantity parameters, and
-//       sorting by _lastUpdated, is implemented so far.
+// TODO: Only searching by type, _id, _lastUpdated and token, string, reference, quantity and date parameters,
+//       and sorting by _lastUpdated, is implemented so far.
 public partial class PostgresFhirIndex : IFhirIndex
 {
     private readonly NpgsqlDataSource _dataSource;
@@ -216,6 +216,10 @@ public partial class PostgresFhirIndex : IFhirIndex
                 case SearchParamType.Quantity when criterium.Modifier is null:
                     return GetIndexClause(query, scope, criterium, Table.SearchQuantity,
                         (comparator, value) => GetQuantityCondition(query, comparator, value));
+
+                case SearchParamType.Date when criterium.Modifier is null:
+                    return GetIndexClause(query, scope, criterium, Table.SearchDate,
+                        (comparator, value) => GetDateCondition(query, comparator, value));
             }
         }
 
@@ -297,6 +301,40 @@ public partial class PostgresFhirIndex : IFhirIndex
         // Several values are only allowed without a comparator, and each of them is then an equality.
         Operator comparator = criterium.Operator == Operator.IN ? Operator.EQ : criterium.Operator;
         return string.Join(" OR ", GetValues(criterium).Select(value => $"({getCondition(comparator, GetEscapedValue(criterium, value))})"));
+    }
+
+    /// <summary>
+    /// Both the search value and the indexed value are ranges: 2026-09 is all of September, and a period without
+    /// an end is unbounded. The comparators follow the FHIR definitions for ranges, where eq means that the
+    /// search range contains the indexed range, and gt means that the indexed range reaches beyond the search range.
+    /// </summary>
+    private static string GetDateCondition(Query query, Operator comparator, string value)
+    {
+        string text = StringValue.UnescapeString(value);
+        if (!FhirDateTime.IsValidValue(text))
+            throw Error.BadRequest($"'{text}' is not a valid date.");
+
+        FhirDateTime date = new(text);
+        string lower = query.AddParameter(date.LowerBound().UtcDateTime);
+        string upper = query.AddParameter(date.UpperBound().UtcDateTime);
+        string search = $"tstzrange(@{lower}, @{upper}, '[)')";
+        string contained = $"i.period <@ {search}";
+        string above = $"i.period && tstzrange(@{upper}, NULL, '[)')";
+        string below = $"i.period && tstzrange(NULL, @{lower}, '[)')";
+
+        return comparator switch
+        {
+            Operator.EQ => contained,
+            Operator.NOT_EQUAL => $"NOT ({contained})",
+            Operator.GT => above,
+            Operator.LT => below,
+            Operator.GTE => $"{above} OR {contained}",
+            Operator.LTE => $"{below} OR {contained}",
+            Operator.STARTS_AFTER => $"i.period >> {search}",
+            Operator.ENDS_BEFORE => $"i.period << {search}",
+            Operator.APPROX => $"i.period && {search}",
+            _ => throw NotImplemented($"The {comparator} comparator is not implemented for dates."),
+        };
     }
 
     /// <summary>

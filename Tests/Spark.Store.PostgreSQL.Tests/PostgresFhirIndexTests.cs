@@ -372,6 +372,86 @@ public class PostgresFhirIndexTests : IAsyncLifetime
     }
 
     [Theory]
+    [InlineData("2026-09", "e1,e2")]
+    [InlineData("eq2026-09", "e1,e2")]
+    // A resource without a date (e5) never matches a comparison, only :missing.
+    [InlineData("ne2026-09", "e3,e4")]
+    [InlineData("gt2026-09", "e3")]
+    [InlineData("lt2026-09", "e4")]
+    [InlineData("ge2026-09", "e1,e2,e3")]
+    [InlineData("le2026-09", "e1,e2,e4")]
+    [InlineData("sa2026-09", "")]
+    [InlineData("eb2026-09", "")]
+    [InlineData("ap2026-09", "e1,e2,e3,e4")]
+    [InlineData("2026-09-17", "e2")]
+    [InlineData("gt2026-09-17", "e3")]
+    [InlineData("lt2026-09-17", "e1,e4")]
+    [InlineData("sa2026-09-17", "e3")]
+    [InlineData("eb2026-09-17", "e1,e4")]
+    [InlineData("2026-09-11", "")]
+    [InlineData("ap2026-09-11", "e1")]
+    [InlineData("2026-09-17T08:30:00Z", "")]
+    [InlineData("ap2026-09-17T08:30:00Z", "e2")]
+    [InlineData("2026-09-17,2026-09-05", "e2")]
+    public async Task SearchAsync_ByDate_ComparesRanges(string value, string expected)
+    {
+        await AddIndexedAsync(CreateEncounter("e1", "2026-09-10", "2026-09-12"));
+        await AddIndexedAsync(CreateEncounter("e2", "2026-09-17T08:00:00Z", "2026-09-17T10:00:00Z"));
+        await AddIndexedAsync(CreateEncounter("e3", "2026-09-20", null));
+        await AddIndexedAsync(CreateEncounter("e4", null, "2026-09-05"));
+        await AddIndexedAsync(CreateEncounter("e5", null, null));
+
+        SearchResults results = await _index.SearchAsync("Encounter", new SearchParams().Add("date", value));
+
+        Assert.Equal(
+            expected.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(id => $"Encounter/{id}/_history/1"),
+            results.Order());
+    }
+
+    [Theory]
+    [InlineData("date:missing", "true", "e2")]
+    [InlineData("date:missing", "false", "e1")]
+    public async Task SearchAsync_ByDateMissing_MatchesResourcesWithoutDate(string name, string value, string expected)
+    {
+        await AddIndexedAsync(CreateEncounter("e1", "2026-09-10", null));
+        await AddIndexedAsync(CreateEncounter("e2", null, null));
+
+        SearchResults results = await _index.SearchAsync("Encounter", new SearchParams().Add(name, value));
+
+        Assert.Equal([$"Encounter/{expected}/_history/1"], results);
+    }
+
+    [Theory]
+    [InlineData("1980", "p1")]
+    [InlineData("1980-05", "p1")]
+    [InlineData("1980-05-15", "")]
+    [InlineData("ap1980-05-15", "p1")]
+    [InlineData("lt1990", "p1")]
+    [InlineData("gt1990", "p2")]
+    public async Task SearchAsync_ByBirthdate_UsesPrecisionOfBothValues(string value, string expected)
+    {
+        Patient p1 = CreatePatient("p1", "One");
+        p1.BirthDate = "1980-05";
+        Patient p2 = CreatePatient("p2", "Two");
+        p2.BirthDate = "2001-02-03";
+        await AddIndexedAsync(p1);
+        await AddIndexedAsync(p2);
+
+        SearchResults results = await _index.SearchAsync("Patient", new SearchParams().Add("birthdate", value));
+
+        AssertIds(expected, results);
+    }
+
+    [Fact]
+    public async Task SearchAsync_ByInvalidDate_ThrowsBadRequest()
+    {
+        SparkException exception = await Assert.ThrowsAsync<SparkException>(
+            () => _index.SearchAsync("Patient", new SearchParams().Add("birthdate", "not-a-date")));
+
+        Assert.Equal(HttpStatusCode.BadRequest, exception.StatusCode);
+    }
+
+    [Theory]
     [InlineData("abc|http://unitsofmeasure.org|mg")]
     [InlineData("5|mg")]
     public async Task SearchAsync_ByInvalidQuantity_ThrowsBadRequest(string value)
@@ -383,7 +463,7 @@ public class PostgresFhirIndexTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData("birthdate", "2000-01-01")]
+    [InlineData("birthdate:unknown-modifier", "2000-01-01")]
     [InlineData("gender:text", "female")]
     [InlineData("family:missing-modifier", "x")]
     [InlineData("general-practitioner:unknown-modifier", "x")]
@@ -493,6 +573,17 @@ public class PostgresFhirIndexTests : IAsyncLifetime
         await AddIndexedAsync(o3);
         await AddIndexedAsync(CreateObservation("o4", "http://other.example.org/fhir/Patient/9"));
         await AddIndexedAsync(CreateObservation("o5", "Group/pa"));
+    }
+
+    private static Encounter CreateEncounter(string id, string start, string end)
+    {
+        return new Encounter
+        {
+            Id = id,
+            Status = Encounter.EncounterStatus.Finished,
+            Class = new Coding("http://terminology.hl7.org/CodeSystem/v3-ActCode", "AMB"),
+            Period = start == null && end == null ? null : new Period { Start = start, End = end },
+        };
     }
 
     private static Observation CreateObservation(string id, Quantity value)
