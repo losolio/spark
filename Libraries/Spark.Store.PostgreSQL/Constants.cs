@@ -18,6 +18,12 @@ internal static class Table
     public const string SearchQuantity = "search_quantity";
     public const string SearchReference = "search_reference";
     public const string SearchUri = "search_uri";
+
+    /// <summary>The search index tables, which hold rows derived from the resources table.</summary>
+    public static readonly string[] SearchIndex =
+    [
+        SearchString, SearchToken, SearchDate, SearchNumber, SearchQuantity, SearchReference, SearchUri,
+    ];
     public const string Snapshots = "snapshots";
     public const string IndexQueue = "index_queue";
     public const string DatabaseMigrations = "database_migrations";

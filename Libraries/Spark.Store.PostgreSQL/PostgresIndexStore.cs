@@ -27,12 +27,6 @@ namespace Spark.Store.PostgreSQL;
 /// </remarks>
 public class PostgresIndexStore : IIndexStore
 {
-    private static readonly string[] SearchTables =
-    [
-        Table.SearchString, Table.SearchToken, Table.SearchDate, Table.SearchNumber,
-        Table.SearchQuantity, Table.SearchReference, Table.SearchUri,
-    ];
-
     private readonly NpgsqlDataSource _dataSource;
     private readonly SearchIndexRowMapper _mapper;
     private readonly ConcurrentDictionary<(string ResourceType, string Code), short> _paramIds = new();
@@ -146,7 +140,7 @@ public class PostgresIndexStore : IIndexStore
 
     public async Task CleanAsync()
     {
-        await using NpgsqlCommand command = _dataSource.CreateCommand($"TRUNCATE TABLE {string.Join(", ", SearchTables)}");
+        await using NpgsqlCommand command = _dataSource.CreateCommand($"TRUNCATE TABLE {string.Join(", ", Table.SearchIndex)}");
         await command.ExecuteNonQueryAsync().ConfigureAwait(false);
     }
 
@@ -204,7 +198,7 @@ public class PostgresIndexStore : IIndexStore
 
     private static void AddDeletes(NpgsqlBatch batch, long resourceKey)
     {
-        foreach (string table in SearchTables)
+        foreach (string table in Table.SearchIndex)
         {
             batch.BatchCommands.Add(CreateBatchCommand(
                 $"DELETE FROM {table} WHERE resource_key = @resourceKey",
