@@ -17,11 +17,13 @@ using Spark.Engine.Search.Types;
 using Spark.Store.PostgreSQL.Search;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Error = Spark.Engine.Core.Error;
+using Metrics = Fhir.Metrics;
 using SearchParameter = Spark.Engine.Model.SearchParameter;
 using Task = System.Threading.Tasks.Task;
 
@@ -36,8 +38,8 @@ namespace Spark.Store.PostgreSQL;
 /// than ignored, since ignoring them would widen the result, for example making a conditional create match
 /// every resource of the type.
 /// </remarks>
-// TODO: Only searching by type, _id, _lastUpdated and token, string and reference parameters, and sorting by
-//       _lastUpdated, is implemented so far.
+// TODO: Only searching by type, _id, _lastUpdated and token, string, reference and quantity parameters, and
+//       sorting by _lastUpdated, is implemented so far.
 public partial class PostgresFhirIndex : IFhirIndex
 {
     private readonly NpgsqlDataSource _dataSource;
@@ -210,6 +212,10 @@ public partial class PostgresFhirIndex : IFhirIndex
                 case SearchParamType.Reference when criterium.Modifier is null or "identifier" || _resourceTypes.Contains(criterium.Modifier):
                     return GetIndexClause(query, scope, criterium, Table.SearchReference,
                         value => GetReferenceCondition(query, criterium, searchParameter, value));
+
+                case SearchParamType.Quantity when criterium.Modifier is null:
+                    return GetIndexClause(query, scope, criterium, Table.SearchQuantity,
+                        (comparator, value) => GetQuantityCondition(query, comparator, value));
             }
         }
 
@@ -263,6 +269,13 @@ public partial class PostgresFhirIndex : IFhirIndex
     /// </summary>
     private static string GetIndexClause(Query query, Scope scope, Criterium criterium, string table, Func<string, string> getCondition)
     {
+        return GetIndexClause(query, scope, criterium, table, (comparator, value) => comparator == Operator.EQ
+            ? getCondition(value)
+            : throw NotImplemented($"The {comparator} comparator is not implemented for {criterium.ParamName}."));
+    }
+
+    private static string GetIndexClause(Query query, Scope scope, Criterium criterium, string table, Func<Operator, string, string> getCondition)
+    {
         string rows =
             $"SELECT 1 FROM {table} i WHERE i.resource_key = {scope.Alias}.resource_key AND i.param_id = " +
             $"(SELECT p.id FROM {Table.SearchParams} p WHERE p.resource_type = @{scope.TypeParameter} " +
@@ -279,13 +292,101 @@ public partial class PostgresFhirIndex : IFhirIndex
         };
     }
 
-    private static string GetMatches(Criterium criterium, Func<string, string> getCondition)
+    private static string GetMatches(Criterium criterium, Func<Operator, string, string> getCondition)
     {
-        if (criterium.Operator is not (Operator.EQ or Operator.IN))
-            throw NotImplemented($"The {criterium.Operator} comparator is not implemented for {criterium.ParamName}.");
-
-        return string.Join(" OR ", GetValues(criterium).Select(value => $"({getCondition(GetEscapedValue(criterium, value))})"));
+        // Several values are only allowed without a comparator, and each of them is then an equality.
+        Operator comparator = criterium.Operator == Operator.IN ? Operator.EQ : criterium.Operator;
+        return string.Join(" OR ", GetValues(criterium).Select(value => $"({getCondition(comparator, GetEscapedValue(criterium, value))})"));
     }
+
+    /// <summary>
+    /// A quantity is number, number||code (any system) or number|system|code. The number has an implicit
+    /// precision, so 5.4 equals any value in [5.35, 5.45), while gt, ge, lt and le compare with the number itself.
+    /// UCUM quantities are converted to their canonical unit first, as they are when they are indexed.
+    /// </summary>
+    private static string GetQuantityCondition(Query query, Operator comparator, string value)
+    {
+        string[] parts = value.SplitNotEscaped('|');
+        if (parts.Length is not (1 or 3) || !decimal.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out decimal number))
+            throw Error.BadRequest($"'{value}' is not a valid quantity.");
+
+        string system = parts.Length == 3 ? NullIfEmpty(StringValue.UnescapeString(parts[1])) : null;
+        string code = parts.Length == 3 ? NullIfEmpty(StringValue.UnescapeString(parts[2])) : null;
+
+        // The implicit range of the number, widened by 10% for ap.
+        decimal half = 0.5m / Pow10(number.Scale);
+        decimal margin = comparator == Operator.APPROX ? Math.Max(half, Math.Abs(number) * 0.1m) : half;
+        (decimal Number, decimal Lower, decimal Upper) range = (number, number - margin, number + margin);
+
+        List<string> units = [];
+        if (code != null && system is null or QuantityExtensions.UcumUriString && TryCanonicalize(range, code, out var canonical))
+        {
+            units.Add($"i.system = @{query.AddParameter(QuantityExtensions.UcumUriString)} AND i.code = @{query.AddParameter(canonical.Code)} " +
+                      $"AND {GetNumberComparison(query, comparator, canonical.Range)}");
+        }
+
+        if (code == null || system != QuantityExtensions.UcumUriString)
+        {
+            string unit = code == null ? "TRUE" : $"i.code = @{query.AddParameter(code)}";
+            if (system != null)
+                unit += $" AND i.system = @{query.AddParameter(system)}";
+            units.Add($"{unit} AND {GetNumberComparison(query, comparator, range)}");
+        }
+
+        return units.Count == 0 ? "FALSE" : string.Join(" OR ", units.Select(unit => $"({unit})"));
+    }
+
+    private static string GetNumberComparison(Query query, Operator comparator, (decimal Number, decimal Lower, decimal Upper) range)
+    {
+        return comparator switch
+        {
+            Operator.EQ or Operator.APPROX => $"i.value >= @{query.AddParameter(range.Lower)} AND i.value < @{query.AddParameter(range.Upper)}",
+            Operator.NOT_EQUAL => $"(i.value < @{query.AddParameter(range.Lower)} OR i.value >= @{query.AddParameter(range.Upper)})",
+            Operator.GT or Operator.STARTS_AFTER => $"i.value > @{query.AddParameter(range.Number)}",
+            Operator.GTE => $"i.value >= @{query.AddParameter(range.Number)}",
+            Operator.LT or Operator.ENDS_BEFORE => $"i.value < @{query.AddParameter(range.Number)}",
+            Operator.LTE => $"i.value <= @{query.AddParameter(range.Number)}",
+            _ => throw NotImplemented($"The {comparator} comparator is not implemented for quantities."),
+        };
+    }
+
+    /// <summary>
+    /// Converts the number and its range to the canonical UCUM unit. Returns false when the code is not a UCUM unit.
+    /// </summary>
+    private static bool TryCanonicalize(
+        (decimal Number, decimal Lower, decimal Upper) range,
+        string code,
+        out (string Code, (decimal Number, decimal Lower, decimal Upper) Range) canonical)
+    {
+        canonical = default;
+        try
+        {
+            Metrics.Quantity number = Canonicalize(range.Number, code);
+            canonical = (number.Metric.ToString(), ((decimal)number.Value, (decimal)Canonicalize(range.Lower, code).Value, (decimal)Canonicalize(range.Upper, code).Value));
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or FormatException or KeyNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private static Metrics.Quantity Canonicalize(decimal value, string code)
+    {
+        return new Quantity { Value = value, System = QuantityExtensions.UcumUriString, Code = code }
+            .ToUnitsOfMeasureQuantity()
+            .Canonical();
+    }
+
+    private static decimal Pow10(int exponent)
+    {
+        decimal result = 1m;
+        for (int i = 0; i < exponent; i++)
+            result *= 10m;
+        return result;
+    }
+
+    private static string NullIfEmpty(string value) => string.IsNullOrEmpty(value) ? null : value;
 
     /// <summary>
     /// A token is code, system|code, |code (a code without a system) or system| (any code in the system).

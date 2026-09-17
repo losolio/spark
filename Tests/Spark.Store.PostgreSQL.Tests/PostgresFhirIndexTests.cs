@@ -340,6 +340,49 @@ public class PostgresFhirIndexTests : IAsyncLifetime
     }
 
     [Theory]
+    [InlineData("5.4|http://unitsofmeasure.org|mmol/L", "q1,q3")]
+    [InlineData("5.4||mmol/L", "q1,q3")]
+    [InlineData("5.40|http://unitsofmeasure.org|mmol/L", "q1,q3")]
+    [InlineData("5|http://unitsofmeasure.org|mmol/L", "q1,q3")]
+    [InlineData("5400|http://unitsofmeasure.org|umol/L", "q1,q3")]
+    [InlineData("gt5.4|http://unitsofmeasure.org|mmol/L", "q2")]
+    [InlineData("ge5.4|http://unitsofmeasure.org|mmol/L", "q1,q2,q3")]
+    [InlineData("lt5.5|http://unitsofmeasure.org|mmol/L", "q1,q3")]
+    [InlineData("le5.4|http://unitsofmeasure.org|mmol/L", "q1,q3")]
+    [InlineData("ne5.4|http://unitsofmeasure.org|mmol/L", "q2")]
+    [InlineData("ap5.4|http://unitsofmeasure.org|mmol/L", "q1,q2,q3")]
+    [InlineData("5.4|http://unitsofmeasure.org|mg", "q5")]
+    [InlineData("2||tablets", "q4")]
+    [InlineData("2|http://example.org/units|tablets", "q4")]
+    [InlineData("2|http://other.example.org/units|tablets", "")]
+    [InlineData("5.4|http://unitsofmeasure.org|not-a-ucum-unit", "")]
+    public async Task SearchAsync_ByQuantity_ComparesWithPrecisionAndCanonicalUnit(string value, string expected)
+    {
+        await AddIndexedAsync(CreateObservation("q1", new Quantity(5.4m, "mmol/L", "http://unitsofmeasure.org")));
+        await AddIndexedAsync(CreateObservation("q2", new Quantity(5.5m, "mmol/L", "http://unitsofmeasure.org")));
+        await AddIndexedAsync(CreateObservation("q3", new Quantity(5400m, "umol/L", "http://unitsofmeasure.org")));
+        await AddIndexedAsync(CreateObservation("q4", new Quantity { Value = 2m, Unit = "tablets", System = "http://example.org/units" }));
+        await AddIndexedAsync(CreateObservation("q5", new Quantity(5.4m, "mg", "http://unitsofmeasure.org")));
+
+        SearchResults results = await _index.SearchAsync("Observation", new SearchParams().Add("value-quantity", value));
+
+        Assert.Equal(
+            expected.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(id => $"Observation/{id}/_history/1"),
+            results.Order());
+    }
+
+    [Theory]
+    [InlineData("abc|http://unitsofmeasure.org|mg")]
+    [InlineData("5|mg")]
+    public async Task SearchAsync_ByInvalidQuantity_ThrowsBadRequest(string value)
+    {
+        SparkException exception = await Assert.ThrowsAsync<SparkException>(
+            () => _index.SearchAsync("Observation", new SearchParams().Add("value-quantity", value)));
+
+        Assert.Equal(HttpStatusCode.BadRequest, exception.StatusCode);
+    }
+
+    [Theory]
     [InlineData("birthdate", "2000-01-01")]
     [InlineData("gender:text", "female")]
     [InlineData("family:missing-modifier", "x")]
@@ -442,7 +485,7 @@ public class PostgresFhirIndexTests : IAsyncLifetime
 
         Observation o2 = CreateObservation("o2", "Patient/pb");
         o2.Performer.Add(new ResourceReference("Practitioner/pr1"));
-        Observation o3 = CreateObservation("o3", null);
+        Observation o3 = CreateObservation("o3", (string)null);
         o3.Subject = new ResourceReference { Identifier = new Identifier("urn:oid:1", "111") };
 
         await AddIndexedAsync(CreateObservation("o1", "Patient/pa"));
@@ -450,6 +493,13 @@ public class PostgresFhirIndexTests : IAsyncLifetime
         await AddIndexedAsync(o3);
         await AddIndexedAsync(CreateObservation("o4", "http://other.example.org/fhir/Patient/9"));
         await AddIndexedAsync(CreateObservation("o5", "Group/pa"));
+    }
+
+    private static Observation CreateObservation(string id, Quantity value)
+    {
+        Observation observation = CreateObservation(id, (string)null);
+        observation.Value = value;
+        return observation;
     }
 
     private static Observation CreateObservation(string id, string subject)
