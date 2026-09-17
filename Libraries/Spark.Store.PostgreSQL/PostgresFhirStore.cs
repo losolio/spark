@@ -127,21 +127,23 @@ public class PostgresFhirStore : IFhirStore
         List<IKey> unversioned = keys.Where(k => !k.HasVersionId()).ToList();
         string[] elementNames = GetElementNames(elements);
 
+        // Current versions and specific versions are looked up in separate branches, so that each can use its own
+        // index. Combining them with OR makes PostgreSQL scan the whole resources table.
         const string sql =
-            "SELECT r.type, r.resource_id, r.version_id, r.method, r.updated_at, " +
-            "  CASE WHEN @elements IS NULL OR r.body IS NULL THEN r.body " +
+            "SELECT found.type, found.resource_id, found.version_id, found.method, found.updated_at, " +
+            "  CASE WHEN @elements IS NULL OR found.body IS NULL THEN found.body " +
             "       ELSE (SELECT COALESCE(jsonb_object_agg(e.key, e.value), '{}'::jsonb) " +
-            "             FROM jsonb_each(r.body) e WHERE e.key = ANY(@elements)) END " +
-            "FROM " + Table.Resources + " r " +
-            "WHERE (r.state = @current AND r.resource_key IN (" +
-            "        SELECT k.id FROM " + Table.ResourceKeys + " k " +
-            "        JOIN unnest(@currentTypes, @currentIds) AS c(type, resource_id) " +
-            "          ON k.type = c.type AND k.resource_id = c.resource_id)) " +
-            "   OR ((r.resource_key, r.version_id) IN (" +
-            "        SELECT k.id, v.version_id FROM " + Table.ResourceKeys + " k " +
-            "        JOIN unnest(@versionTypes, @versionIds, @versionVids) AS v(type, resource_id, version_id) " +
-            "          ON k.type = v.type AND k.resource_id = v.resource_id)) " +
-            "ORDER BY r.id";
+            "             FROM jsonb_each(found.body) e WHERE e.key = ANY(@elements)) END " +
+            "FROM (" +
+            "  SELECT r.* FROM " + Table.ResourceKeys + " k " +
+            "  JOIN unnest(@currentTypes, @currentIds) AS c(type, resource_id) ON k.type = c.type AND k.resource_id = c.resource_id " +
+            "  JOIN " + Table.Resources + " r ON r.resource_key = k.id AND r.state = @current " +
+            "  UNION ALL " +
+            "  SELECT r.* FROM " + Table.ResourceKeys + " k " +
+            "  JOIN unnest(@versionTypes, @versionIds, @versionVids) AS v(type, resource_id, version_id) ON k.type = v.type AND k.resource_id = v.resource_id " +
+            "  JOIN " + Table.Resources + " r ON r.resource_key = k.id AND r.version_id = v.version_id" +
+            ") found " +
+            "ORDER BY found.id";
 
         await using NpgsqlCommand command = _dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("current", ResourceState.Current);
