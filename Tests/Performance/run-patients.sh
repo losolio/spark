@@ -58,7 +58,11 @@ if [ "$STORE" = mongo ]; then
     db.searchindex.createIndex({"internal_resource":1,"code.code":1});
     db.searchindex.createIndex({"internal_resource":1,"subject":1});
     db.searchindex.createIndex({"internal_resource":1,"value-quantity.value":1});
-    db.searchindex.createIndex({"internal_resource":1,"date.start":1});' >/dev/null
+    db.searchindex.createIndex({"internal_resource":1,"date.start":1});
+    db.searchindex.createIndex({"internal_resource":1,"category.code":1});
+    db.searchindex.createIndex({"internal_resource":1,"performer":1});
+    db.searchindex.createIndex({"internal_resource":1,"onset-date.start":1});
+    db.searchindex.createIndex({"internal_resource":1,"class.code":1});' >/dev/null
   PROVIDER=MongoDB
   CONNECTION='mongodb://localhost:57017/spark'
 elif [ "$STORE" = postgres ]; then
@@ -106,7 +110,8 @@ end=$(date +%s)
 } > "$RESULTS/summary.txt"
 
 for query in identifier birthdate family given_birthyear gender_count \
-             observation_code observation_value observation_patient observation_chain encounter_date; do
+             observation_code observation_value observation_category_date observation_patient observation_chain \
+             observation_performer condition_code condition_onset encounter_class_date encounter_date medication_code; do
   k6 search-patients.js -e QUERY=$query > "$RESULTS/search-$query.txt" 2>&1 || true
   {
     echo "== $query"

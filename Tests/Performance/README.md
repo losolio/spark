@@ -9,27 +9,34 @@ stores can be compared on the same data.
 
 1. Starts the database in Docker, limited to 4 CPUs and 4 GB of memory.
 2. Builds Spark.Web.R4 in Release and starts it on the host with the selected store.
-3. Loads the patients with `k6/load-patients.js`: `COUNT` patients with `VUS` concurrent clients, each with an
-   encounter and three vital sign observations (blood pressure with components, heart rate and body weight), so
-   five resources per patient. `CLINICAL=false` loads patients only.
+3. Loads the data with `k6/load-patients.js`, with `VUS` concurrent clients. A pool of 100 practitioners and 20
+   organizations is created once, and each of the `COUNT` patients then gets an encounter, ten observations, one or
+   two conditions and a prescription: about 14 resources per patient. `CLINICAL=false` loads patients only.
 4. Records the load time, the database size and the number of resources.
 5. Runs each search in `k6/search-patients.js` for 30 seconds with 10 concurrent clients.
 
-The patients are deterministic (`k6/patients.js`): patient number `i` always gets the same name, gender, birth date,
-identifier, phone and address. Every store therefore gets identical data, and the searches pick values that exist.
+The data is deterministic (`k6/patients.js` and `k6/clinical.js`): patient number `i` always gets the same name,
+identifier, birth date, measurements, diagnoses and prescription. Every store therefore gets identical data, and the
+searches pick values that exist.
 
-| Search | Query | Matches |
+| Search | What it exercises | Matches |
 |---|---|---|
-| `identifier` | `identifier=urn:oid:2.16.578.1.12.4.1.4.1\|<value>` | 1 |
-| `birthdate` | `birthdate=<day>` | a few |
-| `family` | `family=<first four letters>&_count=10` | thousands |
-| `given_birthyear` | `given=<name>&birthdate=<year>&_count=10` | tens |
-| `gender_count` | `gender=female&_summary=count` | half of the patients |
-| `observation_code` | `Observation?code=http://loinc.org\|85354-9` | one per patient |
-| `observation_value` | `Observation?code=…29463-7&value-quantity=gt<n>\|…\|kg` | a share of the patients |
-| `observation_patient` | `Observation?subject:Patient.identifier=…` | 4 |
-| `observation_chain` | `Observation?subject:Patient.family=<prefix>` | thousands |
-| `encounter_date` | `Encounter?date=<month>` | a share of the encounters |
+| `identifier` | token, exact | 1 |
+| `birthdate` | date, one day | a few |
+| `family` | string, prefix | thousands |
+| `given_birthyear` | string and date together | tens |
+| `gender_count` | `_summary=count` | half of the patients |
+| `observation_code` | token that matches a whole type | one per patient |
+| `observation_value` | quantity with a prefix, in the canonical unit | a share of the patients |
+| `observation_category_date` | token and date range together | thousands |
+| `observation_patient` | chain ending in a token | 10 |
+| `observation_chain` | chain ending in a string | thousands |
+| `observation_performer` | chain to the practitioner who measured | a hundredth of the observations |
+| `condition_code` | token on a diagnosis | a sixth of the patients |
+| `condition_onset` | date range over onset dates | a share of the conditions |
+| `encounter_class_date` | token and period together | a share of the encounters |
+| `encounter_date` | period | a share of the encounters |
+| `medication_code` | token on a prescription | a fifth of the patients |
 
 ## Running
 

@@ -12,10 +12,13 @@ export const options = {
 
 function pick() { return Math.floor(Math.random() * COUNT); }
 
+function between(min, max) { return min + Math.floor(Math.random() * (max - min + 1)); }
+
 const queries = {
+  // --- Patient ---
   // Exactly one match.
   identifier: () => `Patient?identifier=urn:oid:2.16.578.1.12.4.1.4.1|${patientValues(pick()).identifier}`,
-  // A handful of matches: about 100000 / 36500 per day.
+  // A handful of matches: about COUNT / 36500 per day.
   birthdate: () => `Patient?birthdate=${patientValues(pick()).birthDate}`,
   // About 2% of the patients share a family name, so this returns around two thousand matches.
   family: () => `Patient?family=${encodeURIComponent(patientValues(pick()).family.slice(0, 4))}&_count=10`,
@@ -23,17 +26,32 @@ const queries = {
   given_birthyear: () => { const v = patientValues(pick()); return `Patient?given=${encodeURIComponent(v.given)}&birthdate=${v.birthDate.slice(0, 4)}&_count=10`; },
   // Counting half of the patients.
   gender_count: () => `Patient?gender=female&_summary=count`,
-  // Clinical searches, when the data was loaded with CLINICAL=true.
-  // Every patient has one blood pressure panel.
+
+  // --- Clinical, when the data was loaded with CLINICAL=true ---
+  // One blood pressure panel per patient: a token search that matches everything of its type.
   observation_code: () => `Observation?code=http://loinc.org|85354-9&_count=10`,
-  // Body weight above a value: a quantity comparison over all patients.
-  observation_value: () => `Observation?code=http://loinc.org|29463-7&value-quantity=gt${90 + Math.floor(Math.random() * 10)}|http://unitsofmeasure.org|kg&_count=10`,
-  // The observations of one patient, found by the identifier of the patient: a chained search that ends in a token.
+  // A laboratory result above a value: a quantity comparison in the canonical unit.
+  observation_value: () => `Observation?code=http://loinc.org|2339-0&value-quantity=gt${between(10, 14)}|http://unitsofmeasure.org|mmol/L&_count=10`,
+  // Observations of one category in a period: a token and a date range together.
+  observation_category_date: () => `Observation?category=laboratory&date=${between(2022, 2025)}-${String(between(1, 12)).padStart(2, '0')}&_count=10`,
+  // The observations of one patient, found by the identifier of the patient: a chain that ends in a token.
   observation_patient: () => `Observation?subject:Patient.identifier=urn:oid:2.16.578.1.12.4.1.4.1|${patientValues(pick()).identifier}&_count=10`,
-  // Observations of patients with a family name: a chained search.
+  // Observations of patients with a family name: a chain that ends in a string.
   observation_chain: () => `Observation?subject:Patient.family=${encodeURIComponent(patientValues(pick()).family.slice(0, 4))}&_count=10`,
-  // Encounters in a month: a date range over periods.
-  encounter_date: () => `Encounter?date=${2022 + Math.floor(Math.random() * 4)}-${String(1 + Math.floor(Math.random() * 12)).padStart(2, '0')}&_count=10`,
+  // Everything one practitioner measured: a reference search over a hundredth of the observations.
+  observation_performer: () => `Observation?performer:Practitioner.identifier=urn:oid:2.16.578.1.12.4.1.4.4|${900000 + between(0, 99)}&_count=10`,
+
+  // --- Condition, Encounter and MedicationRequest ---
+  // One diagnosis code: a sixth of the patients.
+  condition_code: () => `Condition?code=http://snomed.info/sct|38341003&_count=10`,
+  // Diagnoses that started in a period.
+  condition_onset: () => `Condition?onset-date=${between(2016, 2025)}-${String(between(1, 12)).padStart(2, '0')}&_count=10`,
+  // Emergency encounters in a month: a token and a period.
+  encounter_class_date: () => `Encounter?class=http://terminology.hl7.org/CodeSystem/v3-ActCode|EMER&date=${between(2022, 2025)}-${String(between(1, 12)).padStart(2, '0')}&_count=10`,
+  // Encounters in a month.
+  encounter_date: () => `Encounter?date=${between(2022, 2025)}-${String(between(1, 12)).padStart(2, '0')}&_count=10`,
+  // One medication: a fifth of the patients.
+  medication_code: () => `MedicationRequest?code=http://snomed.info/sct|386864001&_count=10`,
 };
 
 export default function () {
