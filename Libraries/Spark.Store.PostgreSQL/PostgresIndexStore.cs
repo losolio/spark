@@ -49,8 +49,9 @@ public class PostgresIndexStore : IIndexStore
         await using NpgsqlConnection connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
         await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync().ConfigureAwait(false);
 
-        // The no-op update row-locks the resource_keys row, which serializes indexing of the same
-        // resource so that two saves cannot interleave their deletes and inserts.
+        // The no-op update row-locks the resource_keys row, which serializes indexing of the same resource. It has to
+        // be a statement of its own: the sub-statements of a WITH share one snapshot, taken before the lock is
+        // granted, so the deletes would not see the rows another save just committed.
         long resourceKey;
         await using (NpgsqlCommand upsertKey = new(
             $"INSERT INTO {Table.ResourceKeys} (type, resource_id, last_version) VALUES (@type, @id, 0) " +
@@ -63,93 +64,103 @@ public class PostgresIndexStore : IIndexStore
             resourceKey = (long)await upsertKey.ExecuteScalarAsync().ConfigureAwait(false);
         }
 
-        await using (NpgsqlBatch batch = new(connection, transaction))
-        {
-            AddDeletes(batch, resourceKey);
+        // Removing the rows of the previous version and writing the new ones is one statement, so that a save costs
+        // one round trip instead of one per search index table.
+        List<string> parts = [.. Table.SearchIndex.Select((table, i) =>
+            $"d{i} AS (DELETE FROM {table} WHERE resource_key = @resourceKey)")];
 
-            if (rows.Strings.Count > 0)
+        await using NpgsqlCommand command = new() { Connection = connection, Transaction = transaction };
+        command.Parameters.AddWithValue("resourceKey", resourceKey);
+
+        AddInsert(parts, command, rows.Strings,
+            $"INSERT INTO {Table.SearchString} (resource_key, param_id, value_normalized, value_exact) " +
+            "SELECT @resourceKey, * FROM unnest(@stringParam, @stringNormalized, @stringExact)",
+            ("stringParam", rows.Strings.Select(row => paramIds[row.Param]).ToArray()),
+            ("stringNormalized", rows.Strings.Select(row => row.ValueNormalized).ToArray()),
+            ("stringExact", rows.Strings.Select(row => row.ValueExact).ToArray()));
+
+        AddInsert(parts, command, rows.Tokens,
+            $"INSERT INTO {Table.SearchToken} (resource_key, param_id, system, code, text) " +
+            "SELECT @resourceKey, * FROM unnest(@tokenParam, @tokenSystem, @tokenCode, @tokenText)",
+            ("tokenParam", rows.Tokens.Select(row => paramIds[row.Param]).ToArray()),
+            ("tokenSystem", rows.Tokens.Select(row => row.System).ToArray()),
+            ("tokenCode", rows.Tokens.Select(row => row.Code).ToArray()),
+            ("tokenText", rows.Tokens.Select(row => row.Text).ToArray()));
+
+        AddInsert(parts, command, rows.Numbers,
+            $"INSERT INTO {Table.SearchNumber} (resource_key, param_id, value) " +
+            "SELECT @resourceKey, * FROM unnest(@numberParam, @numberValue)",
+            ("numberParam", rows.Numbers.Select(row => paramIds[row.Param]).ToArray()),
+            ("numberValue", rows.Numbers.Select(row => row.Value).ToArray()));
+
+        AddInsert(parts, command, rows.Uris,
+            $"INSERT INTO {Table.SearchUri} (resource_key, param_id, value) " +
+            "SELECT @resourceKey, * FROM unnest(@uriParam, @uriValue)",
+            ("uriParam", rows.Uris.Select(row => paramIds[row.Param]).ToArray()),
+            ("uriValue", rows.Uris.Select(row => row.Value).ToArray()));
+
+        // A null bound in tstzrange is unbounded on that side.
+        AddInsert(parts, command, rows.Dates,
+            $"INSERT INTO {Table.SearchDate} (resource_key, param_id, period) " +
+            "SELECT @resourceKey, t.param, tstzrange(t.start_at, t.end_at, '[)') " +
+            "FROM unnest(@dateParam, @dateStart, @dateEnd) AS t(param, start_at, end_at)",
+            ("dateParam", rows.Dates.Select(row => paramIds[row.Param]).ToArray()),
+            ("dateStart", new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.TimestampTz, Value = rows.Dates.Select(row => row.Start?.UtcDateTime).ToArray() }),
+            ("dateEnd", new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.TimestampTz, Value = rows.Dates.Select(row => row.End?.UtcDateTime).ToArray() }));
+
+        AddInsert(parts, command, rows.Quantities,
+            $"INSERT INTO {Table.SearchQuantity} (resource_key, param_id, system, code, value) " +
+            "SELECT @resourceKey, * FROM unnest(@quantityParam, @quantitySystem, @quantityCode, @quantityValue)",
+            ("quantityParam", rows.Quantities.Select(row => paramIds[row.Param]).ToArray()),
+            ("quantitySystem", rows.Quantities.Select(row => row.System).ToArray()),
+            ("quantityCode", rows.Quantities.Select(row => row.Code).ToArray()),
+            ("quantityValue", rows.Quantities.Select(row => row.Value).ToArray()));
+
+        AddInsert(parts, command, rows.References,
+            $"INSERT INTO {Table.SearchReference} (resource_key, param_id, target_key, target_url, identifier_system, identifier_value) " +
+            "SELECT @resourceKey, * FROM unnest(@referenceParam, @referenceTarget, @referenceUrl, @referenceIdentifierSystem, @referenceIdentifierValue)",
+            ("referenceParam", rows.References.Select(row => paramIds[row.Param]).ToArray()),
+            ("referenceTarget", new NpgsqlParameter
             {
-                AddInsert(batch, resourceKey,
-                    $"INSERT INTO {Table.SearchString} (resource_key, param_id, value_normalized, value_exact) " +
-                    "SELECT @resourceKey, * FROM unnest(@param, @normalized, @exact)",
-                    ("param", rows.Strings.Select(row => paramIds[row.Param]).ToArray()),
-                    ("normalized", rows.Strings.Select(row => row.ValueNormalized).ToArray()),
-                    ("exact", rows.Strings.Select(row => row.ValueExact).ToArray()));
-            }
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint,
+                Value = rows.References.Select(row => row.TargetType == null ? (long?)null : targetKeys[(row.TargetType, row.TargetId)]).ToArray(),
+            }),
+            ("referenceUrl", rows.References.Select(row => row.TargetUrl).ToArray()),
+            ("referenceIdentifierSystem", rows.References.Select(row => row.IdentifierSystem).ToArray()),
+            ("referenceIdentifierValue", rows.References.Select(row => row.IdentifierValue).ToArray()));
 
-            if (rows.Tokens.Count > 0)
-            {
-                AddInsert(batch, resourceKey,
-                    $"INSERT INTO {Table.SearchToken} (resource_key, param_id, system, code, text) " +
-                    "SELECT @resourceKey, * FROM unnest(@param, @system, @code, @text)",
-                    ("param", rows.Tokens.Select(row => paramIds[row.Param]).ToArray()),
-                    ("system", rows.Tokens.Select(row => row.System).ToArray()),
-                    ("code", rows.Tokens.Select(row => row.Code).ToArray()),
-                    ("text", rows.Tokens.Select(row => row.Text).ToArray()));
-            }
-
-            if (rows.Numbers.Count > 0)
-            {
-                AddInsert(batch, resourceKey,
-                    $"INSERT INTO {Table.SearchNumber} (resource_key, param_id, value) " +
-                    "SELECT @resourceKey, * FROM unnest(@param, @value)",
-                    ("param", rows.Numbers.Select(row => paramIds[row.Param]).ToArray()),
-                    ("value", rows.Numbers.Select(row => row.Value).ToArray()));
-            }
-
-            if (rows.Uris.Count > 0)
-            {
-                AddInsert(batch, resourceKey,
-                    $"INSERT INTO {Table.SearchUri} (resource_key, param_id, value) " +
-                    "SELECT @resourceKey, * FROM unnest(@param, @value)",
-                    ("param", rows.Uris.Select(row => paramIds[row.Param]).ToArray()),
-                    ("value", rows.Uris.Select(row => row.Value).ToArray()));
-            }
-
-            if (rows.Dates.Count > 0)
-            {
-                // A null bound in tstzrange is unbounded on that side.
-                AddInsert(batch, resourceKey,
-                    $"INSERT INTO {Table.SearchDate} (resource_key, param_id, period) " +
-                    "SELECT @resourceKey, t.param, tstzrange(t.start_at, t.end_at, '[)') FROM unnest(@param, @start, @end) AS t(param, start_at, end_at)",
-                    ("param", rows.Dates.Select(row => paramIds[row.Param]).ToArray()),
-                    ("start", new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.TimestampTz, Value = rows.Dates.Select(row => row.Start?.UtcDateTime).ToArray() }),
-                    ("end", new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.TimestampTz, Value = rows.Dates.Select(row => row.End?.UtcDateTime).ToArray() }));
-            }
-
-            if (rows.Quantities.Count > 0)
-            {
-                AddInsert(batch, resourceKey,
-                    $"INSERT INTO {Table.SearchQuantity} (resource_key, param_id, system, code, value) " +
-                    "SELECT @resourceKey, * FROM unnest(@param, @system, @code, @value)",
-                    ("param", rows.Quantities.Select(row => paramIds[row.Param]).ToArray()),
-                    ("system", rows.Quantities.Select(row => row.System).ToArray()),
-                    ("code", rows.Quantities.Select(row => row.Code).ToArray()),
-                    ("value", rows.Quantities.Select(row => row.Value).ToArray()));
-            }
-
-            if (rows.References.Count > 0)
-            {
-                AddInsert(batch, resourceKey,
-                    $"INSERT INTO {Table.SearchReference} (resource_key, param_id, target_key, target_url, identifier_system, identifier_value) " +
-                    "SELECT @resourceKey, * FROM unnest(@param, @targetKey, @targetUrl, @identifierSystem, @identifierValue)",
-                    ("param", rows.References.Select(row => paramIds[row.Param]).ToArray()),
-                    ("targetKey", new NpgsqlParameter
-                    {
-                        NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint,
-                        Value = rows.References
-                            .Select(row => row.TargetType == null ? (long?)null : targetKeys[(row.TargetType, row.TargetId)])
-                            .ToArray(),
-                    }),
-                    ("targetUrl", rows.References.Select(row => row.TargetUrl).ToArray()),
-                    ("identifierSystem", rows.References.Select(row => row.IdentifierSystem).ToArray()),
-                    ("identifierValue", rows.References.Select(row => row.IdentifierValue).ToArray()));
-            }
-
-            await batch.ExecuteNonQueryAsync().ConfigureAwait(false);
-        }
-
+        command.CommandText = "WITH " + string.Join(", ", parts) + " SELECT 1";
+        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
         await transaction.CommitAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Adds the insert of one search index table to the statement, when the resource has rows for it.
+    /// </summary>
+    private static void AddInsert<TRow>(
+        List<string> parts,
+        NpgsqlCommand command,
+        List<TRow> rows,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        if (rows.Count == 0)
+            return;
+
+        parts.Add($"i{parts.Count} AS ({sql})");
+        foreach ((string name, object value) in parameters)
+        {
+            if (value is NpgsqlParameter typed)
+            {
+                // Arrays with nulls need an explicit type, which a prepared parameter carries.
+                typed.ParameterName = name;
+                command.Parameters.Add(typed);
+            }
+            else
+            {
+                command.Parameters.AddWithValue(name, value);
+            }
+        }
     }
 
     public async Task DeleteAsync(Entry entry)
@@ -172,9 +183,12 @@ public class PostgresIndexStore : IIndexStore
         // A resource that was never stored has nothing indexed.
         if (resourceKey is long key)
         {
-            await using NpgsqlBatch batch = new(connection, transaction);
-            AddDeletes(batch, key);
-            await batch.ExecuteNonQueryAsync().ConfigureAwait(false);
+            string parts = string.Join(", ", Table.SearchIndex.Select((table, i) =>
+                $"d{i} AS (DELETE FROM {table} WHERE resource_key = @resourceKey)"));
+
+            await using NpgsqlCommand command = new($"WITH {parts} SELECT 1", connection, transaction);
+            command.Parameters.AddWithValue("resourceKey", key);
+            await command.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
 
         await transaction.CommitAsync().ConfigureAwait(false);
@@ -279,21 +293,6 @@ public class PostgresIndexStore : IIndexStore
         }
 
         return keys;
-    }
-
-    private static void AddDeletes(NpgsqlBatch batch, long resourceKey)
-    {
-        foreach (string table in Table.SearchIndex)
-        {
-            batch.BatchCommands.Add(CreateBatchCommand(
-                $"DELETE FROM {table} WHERE resource_key = @resourceKey",
-                ("resourceKey", resourceKey)));
-        }
-    }
-
-    private static void AddInsert(NpgsqlBatch batch, long resourceKey, string sql, params (string Name, object Value)[] columns)
-    {
-        batch.BatchCommands.Add(CreateBatchCommand(sql, [("resourceKey", resourceKey), .. columns]));
     }
 
     private static NpgsqlBatchCommand CreateBatchCommand(string sql, params (string Name, object Value)[] parameters)

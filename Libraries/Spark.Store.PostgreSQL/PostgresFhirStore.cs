@@ -42,9 +42,11 @@ public class PostgresFhirStore : IFhirStore
         await using NpgsqlConnection connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
         await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync().ConfigureAwait(false);
 
-        // Look up the surrogate key of the logical resource, creating it when the version id was not
-        // allocated by PostgresIdentityGenerator. The no-op update row-locks the resource_keys row,
-        // which serializes writers of the same logical resource so that supersede + insert cannot interleave.
+        // Look up the surrogate key of the logical resource, creating it when the version id was not allocated by
+        // PostgresIdentityGenerator. The no-op update row-locks the resource_keys row, which serializes writers of
+        // the same logical resource so that supersede + insert cannot interleave. It has to be a statement of its
+        // own: the sub-statements of a WITH share one snapshot, taken before the lock is granted, so a combined
+        // statement would not see the version another writer just committed.
         long resourceKey;
         await using (NpgsqlCommand upsertKey = new(
             $"INSERT INTO {Table.ResourceKeys} (type, resource_id, last_version) VALUES (@type, @id, 0) " +
