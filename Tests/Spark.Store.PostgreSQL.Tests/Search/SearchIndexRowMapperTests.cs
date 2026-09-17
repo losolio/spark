@@ -5,13 +5,9 @@
  */
 
 using Hl7.Fhir.Model;
-using Hl7.Fhir.Specification;
 using Spark.Engine.Core;
 using Spark.Engine.Model;
-using Spark.Engine.Search;
 using Spark.Engine.Search.Types;
-using Spark.Engine.Service.FhirServiceExtensions;
-using Spark.Engine.Store.Interfaces;
 using Spark.Store.PostgreSQL.Search;
 using System;
 using System.Collections.Generic;
@@ -21,24 +17,16 @@ using Task = System.Threading.Tasks.Task;
 
 namespace Spark.Store.PostgreSQL.Tests.Search;
 
-/// <summary>
-/// Runs resources through the real <see cref="IndexService"/>, so that the mapper is tested against the
-/// index values the element indexer actually produces.
-/// </summary>
 public class SearchIndexRowMapperTests
 {
-    private readonly IFhirModel _fhirModel = new FhirModel();
-    private readonly IndexService _indexService;
+    private readonly ResourceIndexer _indexer;
     private readonly SearchIndexRowMapper _mapper;
 
     public SearchIndexRowMapperTests()
     {
-        _indexService = new IndexService(
-            _fhirModel,
-            new DiscardingIndexStore(),
-            new ElementIndexer(_fhirModel),
-            new ResourceResolver(_fhirModel.SupportedResources, new PocoStructureDefinitionSummaryProvider()));
-        _mapper = new SearchIndexRowMapper(_fhirModel);
+        IFhirModel fhirModel = new FhirModel();
+        _indexer = new ResourceIndexer(fhirModel);
+        _mapper = new SearchIndexRowMapper(fhirModel);
     }
 
     [Fact]
@@ -207,9 +195,7 @@ public class SearchIndexRowMapperTests
 
     private async System.Threading.Tasks.Task<SearchIndexRows> MapAsync(Resource resource, string id = "1")
     {
-        resource.Id = id;
-        IndexValue root = await _indexService.IndexResourceAsync(resource, Key.Create(resource.TypeName, id, "1"));
-        return _mapper.Map(root);
+        return _mapper.Map(await _indexer.IndexAsync(resource, id));
     }
 
     private static IEnumerable<string> AllParams(SearchIndexRows rows)
@@ -218,14 +204,5 @@ public class SearchIndexRowMapperTests
             .Concat(rows.Tokens.Select(row => row.Param))
             .Concat(rows.Numbers.Select(row => row.Param))
             .Concat(rows.Uris.Select(row => row.Param));
-    }
-
-    private sealed class DiscardingIndexStore : IIndexStore
-    {
-        public Task SaveAsync(IndexValue indexValue) => Task.CompletedTask;
-
-        public Task DeleteAsync(Entry entry) => Task.CompletedTask;
-
-        public Task CleanAsync() => Task.CompletedTask;
     }
 }
