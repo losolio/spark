@@ -50,6 +50,6 @@ public static class IServiceCollectionExtensions
         services.TryAddSingleton<IIndexStore>(provider => new PostgresIndexStore(
             provider.GetRequiredService<NpgsqlDataSource>(), provider.GetRequiredService<IFhirModel>()));
         services.TryAddTransient<IFhirIndex>(provider => new PostgresFhirIndex(
-            provider.GetRequiredService<NpgsqlDataSource>()));
+            provider.GetRequiredService<NpgsqlDataSource>(), provider.GetRequiredService<IFhirModel>()));
     }
 }
