@@ -63,6 +63,96 @@ public class PostgresIndexStoreTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SaveAsync_WritesDateQuantityAndReferenceRows()
+    {
+        Encounter encounter = new()
+        {
+            Status = Encounter.EncounterStatus.InProgress,
+            Class = new Coding("http://terminology.hl7.org/CodeSystem/v3-ActCode", "AMB"),
+            Period = new Period { Start = "2026-09-17" },
+        };
+        await SaveAsync(encounter, "e1");
+        Observation observation = new()
+        {
+            Status = ObservationStatus.Final,
+            Code = new CodeableConcept("http://loinc.org", "2339-0"),
+            Value = new Quantity { Value = 2m, Unit = "tablets", System = "http://example.org/units" },
+            Subject = new ResourceReference { Identifier = new Identifier("urn:oid:1", "12345") },
+            Performer = [new ResourceReference("http://other.example.org/fhir/Practitioner/9")],
+        };
+        await SaveAsync(observation, "o1");
+
+        Assert.Equal(["[\"2026-09-17 00:00:00+00\",)"], await ReadStringsAsync(
+            "SELECT d.period::text FROM search_date d " +
+            "JOIN search_params p ON p.id = d.param_id WHERE p.resource_type = 'Encounter' AND p.code = 'date'"));
+        Assert.Equal(["http://example.org/units|tablets|2"], await ReadStringsAsync(
+            "SELECT q.system || '|' || q.code || '|' || q.value::text FROM search_quantity q " +
+            "JOIN search_params p ON p.id = q.param_id WHERE p.code = 'value-quantity'"));
+        Assert.Equal(["urn:oid:1|12345"], await ReadStringsAsync(
+            "SELECT r.identifier_system || '|' || r.identifier_value FROM search_reference r " +
+            "JOIN search_params p ON p.id = r.param_id WHERE p.resource_type = 'Observation' AND p.code = 'subject'"));
+        Assert.Equal(["http://other.example.org/fhir/Practitioner/9"], await ReadStringsAsync(
+            "SELECT r.target_url FROM search_reference r " +
+            "JOIN search_params p ON p.id = r.param_id WHERE p.resource_type = 'Observation' AND p.code = 'performer'"));
+    }
+
+    [Fact]
+    public async Task SaveAsync_ReferenceToMissingResource_CreatesPlaceholderKeyThatResourceTakesOver()
+    {
+        await SaveAsync(CreateObservation("Patient/p1"), "o1");
+
+        Assert.Equal(1, await CountAsync(
+            "SELECT count(*) FROM resource_keys WHERE type = 'Patient' AND resource_id = 'p1' AND last_version = 0"));
+
+        PostgresFhirStore fhirStore = new(_fixture.DataSource, _fixture.FhirModel);
+        await fhirStore.AddAsync(Entry.PUT(Key.Create("Patient", "p1", "1"), new Patient { Id = "p1" }));
+
+        Assert.Equal(1, await CountAsync("SELECT count(*) FROM resource_keys WHERE type = 'Patient'"));
+        Assert.Equal(1, await CountAsync(
+            "SELECT count(DISTINCT ref.target_key) FROM search_reference ref JOIN resources r ON r.resource_key = ref.target_key " +
+            "WHERE r.type = 'Patient' AND r.resource_id = 'p1'"));
+    }
+
+    [Fact]
+    public async Task SaveAsync_ReferenceToExistingResource_UsesItsKey()
+    {
+        PostgresFhirStore fhirStore = new(_fixture.DataSource, _fixture.FhirModel);
+        await fhirStore.AddAsync(Entry.PUT(Key.Create("Patient", "p1", "1"), new Patient { Id = "p1" }));
+
+        await SaveAsync(CreateObservation("Patient/p1/_history/1"), "o1");
+
+        Assert.Equal(2, await CountAsync("SELECT count(*) FROM resource_keys"));
+        Assert.Equal(1, await CountAsync(
+            "SELECT count(DISTINCT ref.target_key) FROM search_reference ref JOIN resources r ON r.resource_key = ref.target_key"));
+    }
+
+    [Fact]
+    public async Task SaveAsync_RepeatedReferences_ReuseTargetKey()
+    {
+        await SaveAsync(CreateObservation("Patient/p1"), "o1");
+        await SaveAsync(CreateObservation("Patient/p1"), "o1");
+        await SaveAsync(CreateObservation("Patient/p1"), "o2");
+
+        Assert.Equal(1, await CountAsync("SELECT count(*) FROM resource_keys WHERE type = 'Patient'"));
+        Assert.Equal(1, await CountAsync(
+            "SELECT count(DISTINCT target_key) FROM search_reference WHERE target_key IS NOT NULL"));
+    }
+
+    [Fact]
+    public async Task SaveAsync_ConcurrentlyReferencingSameMissingResource_CreatesOnePlaceholder()
+    {
+        IEnumerable<Task> saves = Enumerable.Range(1, 20)
+            .Select(i => Task.Run(async () =>
+                await _store.SaveAsync(await _indexer.IndexAsync(CreateObservation("Patient/p1"), $"o{i}"))));
+
+        await Task.WhenAll(saves);
+
+        Assert.Equal(1, await CountAsync("SELECT count(*) FROM resource_keys WHERE type = 'Patient'"));
+        Assert.Equal(1, await CountAsync(
+            "SELECT count(DISTINCT target_key) FROM search_reference WHERE target_key IS NOT NULL"));
+    }
+
+    [Fact]
     public async Task SaveAsync_SameResourceTwice_ReplacesRows()
     {
         await SaveAsync(CreatePatient("p1", "First"));
@@ -177,6 +267,16 @@ public class PostgresIndexStoreTests : IAsyncLifetime
     private async Task SaveAsync(Resource resource, string id = null)
     {
         await _store.SaveAsync(await _indexer.IndexAsync(resource, id ?? resource.Id ?? "1"));
+    }
+
+    private static Observation CreateObservation(string subject)
+    {
+        return new Observation
+        {
+            Status = ObservationStatus.Final,
+            Code = new CodeableConcept("http://loinc.org", "2339-0"),
+            Subject = new ResourceReference(subject),
+        };
     }
 
     private static Patient CreatePatient(string id, string family)

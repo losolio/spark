@@ -138,6 +138,146 @@ public class SearchIndexRowMapperTests
     }
 
     [Fact]
+    public async Task Map_Date_StoresRangeCoveredByPrecision()
+    {
+        Patient patient = new() { BirthDate = "1980-05" };
+
+        SearchIndexRows rows = await MapAsync(patient);
+
+        Assert.Contains(new DateRow("birthdate",
+            new DateTimeOffset(1980, 5, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(1980, 6, 1, 0, 0, 0, TimeSpan.Zero)), rows.Dates);
+    }
+
+    [Fact]
+    public async Task Map_PeriodWithoutEnd_StoresUnboundedEnd()
+    {
+        Encounter encounter = new()
+        {
+            Status = Encounter.EncounterStatus.InProgress,
+            Class = new Coding("http://terminology.hl7.org/CodeSystem/v3-ActCode", "AMB"),
+            Period = new Period { Start = "2026-09-17T08:00:00Z" },
+        };
+
+        SearchIndexRows rows = await MapAsync(encounter);
+
+        DateRow date = Assert.Single(rows.Dates, row => row.Param == "date");
+        Assert.Equal(new DateTimeOffset(2026, 9, 17, 8, 0, 0, TimeSpan.Zero), date.Start);
+        Assert.Null(date.End);
+    }
+
+    [Fact]
+    public void Map_InvertedPeriod_IsSkipped()
+    {
+        IndexValue root = new("root",
+            new IndexValue("internal_id", new StringValue("Encounter/e1")),
+            new IndexValue("date", new CompositeValue([
+                new IndexValue("start", new DateTimeValue(new DateTimeOffset(2026, 9, 18, 0, 0, 0, TimeSpan.Zero))),
+                new IndexValue("end", new DateTimeValue(new DateTimeOffset(2026, 9, 17, 0, 0, 0, TimeSpan.Zero))),
+            ])));
+
+        Assert.Empty(_mapper.Map(root).Dates);
+    }
+
+    [Fact]
+    public async Task Map_UcumQuantity_StoresCanonicalValue()
+    {
+        Observation observation = new()
+        {
+            Status = ObservationStatus.Final,
+            Code = new CodeableConcept("http://loinc.org", "2339-0"),
+            Value = new Quantity(5m, "mg", "http://unitsofmeasure.org"),
+        };
+
+        SearchIndexRows rows = await MapAsync(observation);
+
+        QuantityRow quantity = Assert.Single(rows.Quantities, row => row.Param == "value-quantity");
+        Assert.Equal("http://unitsofmeasure.org", quantity.System);
+        Assert.Equal("g", quantity.Code);
+        Assert.Equal(0.005m, quantity.Value);
+    }
+
+    [Fact]
+    public async Task Map_NonUcumQuantity_StoresValueAndUnitAsGiven()
+    {
+        Observation observation = new()
+        {
+            Status = ObservationStatus.Final,
+            Code = new CodeableConcept("http://loinc.org", "2339-0"),
+            Value = new Quantity { Value = 2m, Unit = "tablets", System = "http://example.org/units" },
+        };
+
+        SearchIndexRows rows = await MapAsync(observation);
+
+        Assert.Contains(new QuantityRow("value-quantity", "http://example.org/units", "tablets", 2m), rows.Quantities);
+    }
+
+    [Theory]
+    [InlineData("Patient/p1", "Patient", "p1", null)]
+    [InlineData("Patient/p1/_history/2", "Patient", "p1", null)]
+    [InlineData("http://other.example.org/fhir/Patient/9", null, null, "http://other.example.org/fhir/Patient/9")]
+    [InlineData("urn:uuid:5c8b6e2a-7a5d-4c4b-9d2f-1d8f0b3c4e5a", null, null, "urn:uuid:5c8b6e2a-7a5d-4c4b-9d2f-1d8f0b3c4e5a")]
+    public async Task Map_Reference_StoresTargetResourceOrUrl(string reference, string type, string id, string url)
+    {
+        Observation observation = new()
+        {
+            Status = ObservationStatus.Final,
+            Code = new CodeableConcept("http://loinc.org", "2339-0"),
+            Subject = new ResourceReference(reference),
+        };
+
+        SearchIndexRows rows = await MapAsync(observation);
+
+        Assert.Contains(new ReferenceRow("subject", type, id, url, null, null), rows.References);
+    }
+
+    [Theory]
+    [InlineData("Unknown/p1")]
+    [InlineData("p1")]
+    public async Task Map_ReferenceToUnknownTypeOrWithoutType_IsSkipped(string reference)
+    {
+        Observation observation = new()
+        {
+            Status = ObservationStatus.Final,
+            Code = new CodeableConcept("http://loinc.org", "2339-0"),
+            Subject = new ResourceReference(reference),
+        };
+
+        SearchIndexRows rows = await MapAsync(observation);
+
+        Assert.DoesNotContain(rows.References, row => row.Param == "subject");
+    }
+
+    [Fact]
+    public async Task Map_ReferenceByIdentifier_StoresIdentifier()
+    {
+        Observation observation = new()
+        {
+            Status = ObservationStatus.Final,
+            Code = new CodeableConcept("http://loinc.org", "2339-0"),
+            Subject = new ResourceReference { Identifier = new Identifier("urn:oid:2.16.578.1.12.4.1.4.1", "13116900216") },
+        };
+
+        SearchIndexRows rows = await MapAsync(observation);
+
+        Assert.Contains(
+            ReferenceRow.ToIdentifier("subject", "urn:oid:2.16.578.1.12.4.1.4.1", "13116900216"),
+            rows.References);
+    }
+
+    [Fact]
+    public async Task Map_ReferenceToContainedResource_IsSkipped()
+    {
+        Organization organization = new() { Id = "org1", Name = "Contained Hospital" };
+        Patient patient = new() { ManagingOrganization = new ResourceReference("#org1") };
+        patient.Contained.Add(organization);
+
+        SearchIndexRows rows = await MapAsync(patient);
+
+        Assert.DoesNotContain(rows.References, row => row.Param == "organization");
+    }
+
+    [Fact]
     public async Task Map_SkipsInternalFields()
     {
         SearchIndexRows rows = await MapAsync(new Patient(), "p1");
@@ -203,6 +343,9 @@ public class SearchIndexRowMapperTests
         return rows.Strings.Select(row => row.Param)
             .Concat(rows.Tokens.Select(row => row.Param))
             .Concat(rows.Numbers.Select(row => row.Param))
-            .Concat(rows.Uris.Select(row => row.Param));
+            .Concat(rows.Uris.Select(row => row.Param))
+            .Concat(rows.Dates.Select(row => row.Param))
+            .Concat(rows.Quantities.Select(row => row.Param))
+            .Concat(rows.References.Select(row => row.Param));
     }
 }

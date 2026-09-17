@@ -5,6 +5,7 @@
  */
 
 using Npgsql;
+using NpgsqlTypes;
 using Spark.Engine.Core;
 using Spark.Engine.Model;
 using Spark.Engine.Store.Interfaces;
@@ -43,6 +44,7 @@ public class PostgresIndexStore : IIndexStore
 
         SearchIndexRows rows = _mapper.Map(indexValue);
         IReadOnlyDictionary<string, short> paramIds = await GetParamIdsAsync(rows).ConfigureAwait(false);
+        IReadOnlyDictionary<(string Type, string Id), long> targetKeys = await GetTargetKeysAsync(rows).ConfigureAwait(false);
 
         await using NpgsqlConnection connection = await _dataSource.OpenConnectionAsync().ConfigureAwait(false);
         await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync().ConfigureAwait(false);
@@ -104,6 +106,46 @@ public class PostgresIndexStore : IIndexStore
                     ("value", rows.Uris.Select(row => row.Value).ToArray()));
             }
 
+            if (rows.Dates.Count > 0)
+            {
+                // A null bound in tstzrange is unbounded on that side.
+                AddInsert(batch, resourceKey,
+                    $"INSERT INTO {Table.SearchDate} (resource_key, param_id, period) " +
+                    "SELECT @resourceKey, t.param, tstzrange(t.start_at, t.end_at, '[)') FROM unnest(@param, @start, @end) AS t(param, start_at, end_at)",
+                    ("param", rows.Dates.Select(row => paramIds[row.Param]).ToArray()),
+                    ("start", new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.TimestampTz, Value = rows.Dates.Select(row => row.Start?.UtcDateTime).ToArray() }),
+                    ("end", new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.TimestampTz, Value = rows.Dates.Select(row => row.End?.UtcDateTime).ToArray() }));
+            }
+
+            if (rows.Quantities.Count > 0)
+            {
+                AddInsert(batch, resourceKey,
+                    $"INSERT INTO {Table.SearchQuantity} (resource_key, param_id, system, code, value) " +
+                    "SELECT @resourceKey, * FROM unnest(@param, @system, @code, @value)",
+                    ("param", rows.Quantities.Select(row => paramIds[row.Param]).ToArray()),
+                    ("system", rows.Quantities.Select(row => row.System).ToArray()),
+                    ("code", rows.Quantities.Select(row => row.Code).ToArray()),
+                    ("value", rows.Quantities.Select(row => row.Value).ToArray()));
+            }
+
+            if (rows.References.Count > 0)
+            {
+                AddInsert(batch, resourceKey,
+                    $"INSERT INTO {Table.SearchReference} (resource_key, param_id, target_key, target_url, identifier_system, identifier_value) " +
+                    "SELECT @resourceKey, * FROM unnest(@param, @targetKey, @targetUrl, @identifierSystem, @identifierValue)",
+                    ("param", rows.References.Select(row => paramIds[row.Param]).ToArray()),
+                    ("targetKey", new NpgsqlParameter
+                    {
+                        NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint,
+                        Value = rows.References
+                            .Select(row => row.TargetType == null ? (long?)null : targetKeys[(row.TargetType, row.TargetId)])
+                            .ToArray(),
+                    }),
+                    ("targetUrl", rows.References.Select(row => row.TargetUrl).ToArray()),
+                    ("identifierSystem", rows.References.Select(row => row.IdentifierSystem).ToArray()),
+                    ("identifierValue", rows.References.Select(row => row.IdentifierValue).ToArray()));
+            }
+
             await batch.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
 
@@ -149,12 +191,7 @@ public class PostgresIndexStore : IIndexStore
     /// </summary>
     private async Task<IReadOnlyDictionary<string, short>> GetParamIdsAsync(SearchIndexRows rows)
     {
-        string[] codes = rows.Strings.Select(row => row.Param)
-            .Concat(rows.Tokens.Select(row => row.Param))
-            .Concat(rows.Numbers.Select(row => row.Param))
-            .Concat(rows.Uris.Select(row => row.Param))
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
+        string[] codes = rows.Params.ToArray();
 
         Dictionary<string, short> ids = new(StringComparer.Ordinal);
         List<string> missing = [];
@@ -196,6 +233,54 @@ public class PostgresIndexStore : IIndexStore
         return ids;
     }
 
+    /// <summary>
+    /// Looks up the resource keys of the resources on this server that the rows refer to. A target that does
+    /// not exist yet gets a placeholder key without versions, which the resource takes over when it is created.
+    /// </summary>
+    /// <remarks>
+    /// This runs before the transaction that writes the rows, so that saving a resource never holds locks on
+    /// the keys of other resources.
+    /// </remarks>
+    private async Task<IReadOnlyDictionary<(string Type, string Id), long>> GetTargetKeysAsync(SearchIndexRows rows)
+    {
+        (string Type, string Id)[] targets = rows.References
+            .Where(row => row.TargetType != null)
+            .Select(row => (row.TargetType, row.TargetId))
+            .Distinct()
+            .Order()
+            .ToArray();
+
+        Dictionary<(string Type, string Id), long> keys = [];
+        if (targets.Length == 0)
+            return keys;
+
+        (string, object) types = ("types", targets.Select(target => target.Type).ToArray());
+        (string, object) ids = ("ids", targets.Select(target => target.Id).ToArray());
+
+        // As for search parameters, only missing keys are inserted so that lookups do not draw from the
+        // identity sequence, and they are inserted in order so that concurrent inserts cannot deadlock.
+        await using NpgsqlBatch batch = _dataSource.CreateBatch();
+        batch.BatchCommands.Add(CreateBatchCommand(
+            $"INSERT INTO {Table.ResourceKeys} (type, resource_id, last_version) " +
+            "SELECT t.type, t.resource_id, 0 FROM unnest(@types, @ids) AS t(type, resource_id) " +
+            $"WHERE NOT EXISTS (SELECT 1 FROM {Table.ResourceKeys} k WHERE k.type = t.type AND k.resource_id = t.resource_id) " +
+            "ORDER BY t.type, t.resource_id " +
+            "ON CONFLICT (type, resource_id) DO NOTHING",
+            types, ids));
+        batch.BatchCommands.Add(CreateBatchCommand(
+            $"SELECT k.type, k.resource_id, k.id FROM {Table.ResourceKeys} k " +
+            "JOIN unnest(@types, @ids) AS t(type, resource_id) ON k.type = t.type AND k.resource_id = t.resource_id",
+            types, ids));
+
+        await using NpgsqlDataReader reader = await batch.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
+        {
+            keys[(reader.GetString(0), reader.GetString(1))] = reader.GetInt64(2);
+        }
+
+        return keys;
+    }
+
     private static void AddDeletes(NpgsqlBatch batch, long resourceKey)
     {
         foreach (string table in Table.SearchIndex)
@@ -216,7 +301,16 @@ public class PostgresIndexStore : IIndexStore
         NpgsqlBatchCommand command = new(sql);
         foreach ((string name, object value) in parameters)
         {
-            command.Parameters.AddWithValue(name, value);
+            if (value is NpgsqlParameter typed)
+            {
+                // Arrays with nulls need an explicit type, which a prepared parameter carries.
+                typed.ParameterName = name;
+                command.Parameters.Add(typed);
+            }
+            else
+            {
+                command.Parameters.AddWithValue(name, value);
+            }
         }
 
         return command;
