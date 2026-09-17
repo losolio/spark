@@ -10,12 +10,15 @@ using Npgsql;
 using Spark.Engine.Core;
 using Spark.Engine.Extensions;
 using Spark.Engine.Interfaces;
+using Spark.Engine.Search.Support;
 using Spark.Engine.Search.Types;
+using Spark.Store.PostgreSQL.Search;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using Error = Spark.Engine.Core.Error;
 using SearchParameter = Spark.Engine.Model.SearchParameter;
 using Task = System.Threading.Tasks.Task;
 
@@ -30,7 +33,8 @@ namespace Spark.Store.PostgreSQL;
 /// than ignored, since ignoring them would widen the result, for example making a conditional create match
 /// every resource of the type.
 /// </remarks>
-// TODO: Only searching by type, _id and _lastUpdated, and sorting by _lastUpdated, is implemented so far.
+// TODO: Only searching by type, _id, _lastUpdated and token and string parameters, and sorting by _lastUpdated,
+//       is implemented so far.
 public class PostgresFhirIndex : IFhirIndex
 {
     private readonly NpgsqlDataSource _dataSource;
@@ -133,14 +137,14 @@ public class PostgresFhirIndex : IFhirIndex
                 continue;
             }
 
-            AddCriterium(query, criterium);
+            AddCriterium(query, criterium, searchParameter);
             results.UsedCriteria.Add(criterium);
         }
 
         return query;
     }
 
-    private static void AddCriterium(Query query, Criterium criterium)
+    private static void AddCriterium(Query query, Criterium criterium, SearchParameter searchParameter)
     {
         switch (criterium.ParamName)
         {
@@ -154,6 +158,19 @@ public class PostgresFhirIndex : IFhirIndex
             case "_lastUpdated" when criterium.Modifier == null:
                 query.Add(GetLastUpdatedClause(query, criterium));
                 return;
+        }
+
+        if (criterium.Operator != Operator.CHAIN)
+        {
+            switch (searchParameter.Type)
+            {
+                case SearchParamType.Token when criterium.Modifier is null or "not":
+                    AddIndexCriterium(query, criterium, Table.SearchToken, GetTokenCondition);
+                    return;
+                case SearchParamType.String when criterium.Modifier is null or "exact" or "contains":
+                    AddIndexCriterium(query, criterium, Table.SearchString, GetStringCondition);
+                    return;
+            }
         }
 
         throw NotImplemented($"Search parameter {criterium} is not implemented yet for the PostgreSQL store.");
@@ -197,6 +214,106 @@ public class PostgresFhirIndex : IFhirIndex
             Operator.LTE => $"r.updated_at < @{upper}",
             _ => throw NotImplemented($"The {comparator} comparator is not implemented for _lastUpdated."),
         };
+    }
+
+    /// <summary>
+    /// Adds a criterium that matches resources by their rows in a search index table (aliased i). A
+    /// resource matches when any of its rows for the parameter matches any of the values.
+    /// </summary>
+    private static void AddIndexCriterium(
+        Query query,
+        Criterium criterium,
+        string table,
+        Func<Query, string, string, string> getCondition)
+    {
+        string rows =
+            $"SELECT 1 FROM {table} i WHERE i.resource_key = r.resource_key AND i.param_id = " +
+            $"(SELECT p.id FROM {Table.SearchParams} p WHERE p.resource_type = @type AND p.code = @{query.AddParameter(criterium.ParamName)})";
+
+        ValueExpression[] values = criterium.Operator switch
+        {
+            Operator.ISNULL or Operator.NOTNULL => [],
+            Operator.EQ => [(ValueExpression)criterium.Operand],
+            Operator.IN => ((ChoiceValue)criterium.Operand).Choices,
+            _ => throw NotImplemented($"The {criterium.Operator} comparator is not implemented for {criterium.ParamName}."),
+        };
+
+        if (criterium.Operator == Operator.ISNULL)
+        {
+            query.Add($"NOT EXISTS ({rows})");
+            return;
+        }
+
+        if (criterium.Operator == Operator.NOTNULL)
+        {
+            query.Add($"EXISTS ({rows})");
+            return;
+        }
+
+        string matches = string.Join(" OR ", values.Select(value =>
+            $"({getCondition(query, criterium.Modifier, GetEscapedValue(criterium, value))})"));
+
+        // :not matches resources that have no matching token, including resources without the parameter.
+        query.Add(criterium.Modifier == "not"
+            ? $"NOT EXISTS ({rows} AND ({matches}))"
+            : $"EXISTS ({rows} AND ({matches}))");
+    }
+
+    /// <summary>
+    /// A token is code, system|code, |code (a code without a system) or system| (any code in the system).
+    /// </summary>
+    private static string GetTokenCondition(Query query, string modifier, string value)
+    {
+        string[] parts = value.SplitNotEscaped('|');
+        if (parts.Length > 2)
+            throw Error.BadRequest($"'{value}' is not a valid token.");
+
+        string code = StringValue.UnescapeString(parts[^1]);
+        if (parts.Length == 1)
+            return $"i.code = @{query.AddParameter(code)}";
+
+        string system = StringValue.UnescapeString(parts[0]);
+        string systemCondition = system.Length == 0
+            ? "i.system IS NULL"
+            : $"i.system = @{query.AddParameter(system)}";
+
+        return code.Length == 0
+            ? systemCondition
+            : $"{systemCondition} AND i.code = @{query.AddParameter(code)}";
+    }
+
+    /// <summary>
+    /// Strings match case and accent insensitively on the start of the value, anywhere in the value with
+    /// :contains, or exactly with :exact.
+    /// </summary>
+    private static string GetStringCondition(Query query, string modifier, string value)
+    {
+        string text = StringValue.UnescapeString(value);
+        string normalized = SearchIndexRowMapper.NormalizeString(text);
+
+        return modifier switch
+        {
+            // The normalized value narrows the search down using the index before the exact comparison.
+            "exact" => $"i.value_normalized = @{query.AddParameter(normalized)} AND i.value_exact = @{query.AddParameter(text)}",
+            "contains" => $"i.value_normalized LIKE @{query.AddParameter("%" + EscapeLikePattern(normalized) + "%")}",
+            _ => $"i.value_normalized LIKE @{query.AddParameter(EscapeLikePattern(normalized) + "%")}",
+        };
+    }
+
+    private static string EscapeLikePattern(string value)
+    {
+        return value.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");
+    }
+
+    /// <summary>
+    /// The value as it was given, still escaped, so that separators such as | can be told apart from
+    /// escaped ones.
+    /// </summary>
+    private static string GetEscapedValue(Criterium criterium, ValueExpression value)
+    {
+        return value is UntypedValue untyped
+            ? untyped.Value
+            : throw Error.BadRequest($"'{value}' is not a valid value for {criterium.ParamName}.");
     }
 
     private static string GetOrderBy(SearchParams searchCommand)

@@ -26,6 +26,8 @@ public class PostgresFhirIndexTests : IAsyncLifetime
 
     private readonly PostgresFixture _fixture;
     private PostgresFhirStore _store;
+    private PostgresIndexStore _indexStore;
+    private ResourceIndexer _indexer;
     private PostgresFhirIndex _index;
 
     public PostgresFhirIndexTests(PostgresFixture fixture)
@@ -37,6 +39,8 @@ public class PostgresFhirIndexTests : IAsyncLifetime
     {
         await _fixture.ResetAsync();
         _store = new PostgresFhirStore(_fixture.DataSource, _fixture.FhirModel);
+        _indexStore = new PostgresIndexStore(_fixture.DataSource, _fixture.FhirModel);
+        _indexer = new ResourceIndexer(_fixture.FhirModel);
         _index = new PostgresFhirIndex(_fixture.DataSource, _fixture.FhirModel);
     }
 
@@ -182,11 +186,112 @@ public class PostgresFhirIndexTests : IAsyncLifetime
         Assert.Empty(results.UsedCriteria);
     }
 
+    [Theory]
+    [InlineData("family", "gom", "p1")]
+    [InlineData("family", "GÓM", "p1")]
+    [InlineData("family", "Gómez", "p1")]
+    [InlineData("family", "mez", "")]
+    [InlineData("family:contains", "OME", "p1")]
+    [InlineData("family:exact", "Gómez", "p1")]
+    [InlineData("family:exact", "gomez", "")]
+    [InlineData("family", "gom,han", "p1,p2")]
+    [InlineData("given", "åse", "p1")]
+    [InlineData("name", "hansen", "p2")]
+    [InlineData("family", "a_b", "p3")]
+    [InlineData("family", "a%", "")]
+    [InlineData("family", "a\\,b", "p4")]
+    public async Task SearchAsync_ByString_MatchesStartCaseAndAccentInsensitively(string name, string value, string expected)
+    {
+        await AddIndexedAsync(CreatePatient("p1", "Gómez", given: "Åse"));
+        await AddIndexedAsync(CreatePatient("p2", "Hansen"));
+        await AddIndexedAsync(CreatePatient("p3", "a_b"));
+        await AddIndexedAsync(CreatePatient("p4", "a,b"));
+        await AddIndexedAsync(CreatePatient("p5", "axb"));
+
+        SearchResults results = await _index.SearchAsync("Patient", new SearchParams().Add(name, value));
+
+        AssertIds(expected, results);
+    }
+
+    [Theory]
+    [InlineData("identifier", "12345", "p1,p2")]
+    [InlineData("identifier", "urn:oid:1|12345", "p1")]
+    [InlineData("identifier", "|12345", "p2")]
+    [InlineData("identifier", "urn:oid:1|", "p1,p3")]
+    [InlineData("identifier", "urn:oid:1|12345,urn:oid:1|67890", "p1,p3")]
+    [InlineData("identifier", "urn:oid:2|12345", "")]
+    [InlineData("gender", "female", "p1")]
+    [InlineData("gender:not", "female", "p2,p3")]
+    [InlineData("gender:missing", "true", "p3")]
+    [InlineData("gender:missing", "false", "p1,p2")]
+    [InlineData("active", "true", "p2")]
+    public async Task SearchAsync_ByToken_MatchesSystemAndCode(string name, string value, string expected)
+    {
+        Patient p1 = CreatePatient("p1", "One");
+        p1.Identifier.Add(new Identifier("urn:oid:1", "12345"));
+        p1.Gender = AdministrativeGender.Female;
+        Patient p2 = CreatePatient("p2", "Two");
+        p2.Identifier.Add(new Identifier(null, "12345"));
+        p2.Gender = AdministrativeGender.Male;
+        p2.Active = true;
+        Patient p3 = CreatePatient("p3", "Three");
+        p3.Identifier.Add(new Identifier("urn:oid:1", "67890"));
+        await AddIndexedAsync(p1);
+        await AddIndexedAsync(p2);
+        await AddIndexedAsync(p3);
+
+        SearchResults results = await _index.SearchAsync("Patient", new SearchParams().Add(name, value));
+
+        AssertIds(expected, results);
+    }
+
     [Fact]
-    public async Task SearchAsync_ParameterNotImplemented_ThrowsNotImplemented()
+    public async Task SearchAsync_ByTokenWithEscapedSeparator_MatchesCodeContainingSeparator()
+    {
+        Patient patient = CreatePatient("p1", "One");
+        patient.Identifier.Add(new Identifier("urn:oid:1", "a|b"));
+        await AddIndexedAsync(patient);
+
+        SearchResults results = await _index.SearchAsync("Patient", new SearchParams().Add("identifier", @"urn:oid:1|a\|b"));
+
+        AssertIds("p1", results);
+    }
+
+    [Fact]
+    public async Task SearchAsync_ByStringAndToken_CombinesCriteria()
+    {
+        Patient p1 = CreatePatient("p1", "Hansen");
+        p1.Gender = AdministrativeGender.Female;
+        Patient p2 = CreatePatient("p2", "Hansen");
+        p2.Gender = AdministrativeGender.Male;
+        await AddIndexedAsync(p1);
+        await AddIndexedAsync(p2);
+
+        SearchResults results = await _index.SearchAsync("Patient",
+            new SearchParams().Add("family", "hansen").Add("gender", "male"));
+
+        AssertIds("p2", results);
+        Assert.Equal(1, await _index.CountAsync("Patient", new SearchParams().Add("family", "hansen").Add("gender", "male")));
+    }
+
+    [Fact]
+    public async Task SearchAsync_ExcludesResourceWhoseIndexWasDeleted()
+    {
+        await AddIndexedAsync(CreatePatient("p1", "Hansen"));
+        await _indexStore.DeleteAsync(Entry.DELETE(Key.Create("Patient", "p1", "2"), Now));
+
+        Assert.Empty(await _index.SearchAsync("Patient", new SearchParams().Add("family", "hansen")));
+    }
+
+    [Theory]
+    [InlineData("birthdate", "2000-01-01")]
+    [InlineData("gender:text", "female")]
+    [InlineData("family:missing-modifier", "x")]
+    [InlineData("general-practitioner.name", "x")]
+    public async Task SearchAsync_ParameterNotImplemented_ThrowsNotImplemented(string name, string value)
     {
         SparkException exception = await Assert.ThrowsAsync<SparkException>(
-            () => _index.SearchAsync("Patient", new SearchParams().Add("name", "Losvik")));
+            () => _index.SearchAsync("Patient", new SearchParams().Add(name, value)));
 
         Assert.Equal(HttpStatusCode.NotImplemented, exception.StatusCode);
     }
@@ -252,6 +357,36 @@ public class PostgresFhirIndexTests : IAsyncLifetime
 
         await using NpgsqlCommand command = _fixture.DataSource.CreateCommand("SELECT count(*) FROM search_string");
         Assert.Equal(0L, await command.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+    }
+
+    private async Task AddIndexedAsync(Patient patient)
+    {
+        await AddAsync(patient, "1", Now);
+        await _indexStore.SaveAsync(await _indexer.IndexAsync(patient, patient.Id));
+    }
+
+    private static Patient CreatePatient(string id, string family, string given = null)
+    {
+        Patient patient = new() { Id = id };
+        HumanName name = new() { Family = family };
+        if (given != null)
+            name.Given = [given];
+        patient.Name.Add(name);
+        return patient;
+    }
+
+    private static void AssertIds(string expected, SearchResults results)
+    {
+        Assert.Equal(
+            expected.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(id => $"Patient/{id}/_history/1"),
+            results.Order());
+    }
+
+    private Task<Entry> AddAsync(Resource resource, string version, DateTimeOffset when)
+    {
+        Entry entry = Entry.PUT(Key.Create(resource.TypeName, resource.Id, version), resource);
+        entry.When = when;
+        return _store.AddAsync(entry);
     }
 
     private Task<Entry> AddAsync(string type, string id, string version, DateTimeOffset when)
