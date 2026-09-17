@@ -6,6 +6,7 @@
 
 using Npgsql;
 using Spark.Store.PostgreSQL.Schema;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -16,21 +17,13 @@ namespace Spark.Store.PostgreSQL.Tests.Schema;
 public class PostgresSchemaScriptTests
 {
     [Fact]
-    public void GetScripts_ReturnsInitialScriptFirst()
-    {
-        IReadOnlyList<(string Name, string Sql)> scripts = PostgresSchema.GetScripts();
-
-        Assert.NotEmpty(scripts);
-        Assert.Equal("0001_initial.sql", scripts[0].Name);
-        Assert.Contains("CREATE TABLE IF NOT EXISTS resources", scripts[0].Sql);
-    }
-
-    [Fact]
     public void GetScripts_ReturnsScriptsInFileNameOrder()
     {
         IReadOnlyList<(string Name, string Sql)> scripts = PostgresSchema.GetScripts();
 
-        Assert.Equal(["0001_initial.sql", "0002_search_index.sql"], scripts.Select(script => script.Name));
+        Assert.Equal("0001_initial.sql", scripts[0].Name);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS resources", scripts[0].Sql);
+        Assert.Equal(scripts.Select(script => script.Name).Order(StringComparer.Ordinal), scripts.Select(script => script.Name));
     }
 }
 
@@ -38,6 +31,9 @@ public class PostgresSchemaScriptTests
 [Trait("Category", "Integration")]
 public class PostgresSchemaTests
 {
+    /// <summary>Every schema script, so that adding one does not need a change here.</summary>
+    private static IEnumerable<string> ScriptNames => PostgresSchema.GetScripts().Select(script => script.Name);
+
     private readonly PostgresFixture _fixture;
 
     public PostgresSchemaTests(PostgresFixture fixture)
@@ -53,21 +49,12 @@ public class PostgresSchemaTests
         await PostgresSchema.EnsureCreatedAsync(dataSource, TestContext.Current.CancellationToken);
 
         List<string> tables = await GetTablesAsync(dataSource);
-        Assert.Contains(Table.ResourceKeys, tables);
-        Assert.Contains(Table.Resources, tables);
-        Assert.Contains(Table.Snapshots, tables);
-        Assert.Contains(Table.IndexQueue, tables);
-        Assert.Contains(Table.DatabaseMigrations, tables);
-        Assert.Contains(Table.SearchParams, tables);
-        Assert.Contains(Table.SearchString, tables);
-        Assert.Contains(Table.SearchToken, tables);
-        Assert.Contains(Table.SearchDate, tables);
-        Assert.Contains(Table.SearchNumber, tables);
-        Assert.Contains(Table.SearchQuantity, tables);
-        Assert.Contains(Table.SearchReference, tables);
-        Assert.Contains(Table.SearchUri, tables);
+        string[] expected = [
+            Table.ResourceKeys, Table.Resources, Table.Snapshots, Table.IndexQueue, Table.DatabaseMigrations,
+            Table.SearchParams, .. Table.SearchIndex];
+        Assert.All(expected, table => Assert.Contains(table, tables));
         Assert.Contains("btree_gist", await ReadStringsAsync(dataSource, "SELECT extname::text FROM pg_extension"));
-        Assert.Equal(["0001_initial.sql", "0002_search_index.sql"], await GetAppliedScriptsAsync(dataSource));
+        Assert.Equal(ScriptNames, await GetAppliedScriptsAsync(dataSource));
     }
 
     [Fact]
@@ -78,7 +65,7 @@ public class PostgresSchemaTests
         await PostgresSchema.EnsureCreatedAsync(dataSource, TestContext.Current.CancellationToken);
         await PostgresSchema.EnsureCreatedAsync(dataSource, TestContext.Current.CancellationToken);
 
-        Assert.Equal(["0001_initial.sql", "0002_search_index.sql"], await GetAppliedScriptsAsync(dataSource));
+        Assert.Equal(ScriptNames, await GetAppliedScriptsAsync(dataSource));
     }
 
     [Fact]
@@ -91,7 +78,7 @@ public class PostgresSchemaTests
             .Select(_ => PostgresSchema.EnsureCreatedAsync(dataSource, TestContext.Current.CancellationToken));
         await Task.WhenAll(callers);
 
-        Assert.Equal(["0001_initial.sql", "0002_search_index.sql"], await GetAppliedScriptsAsync(dataSource));
+        Assert.Equal(ScriptNames, await GetAppliedScriptsAsync(dataSource));
     }
 
     private static async Task<List<string>> GetTablesAsync(NpgsqlDataSource dataSource)
