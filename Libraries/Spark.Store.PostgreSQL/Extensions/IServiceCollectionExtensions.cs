@@ -11,6 +11,7 @@ using Npgsql;
 using Spark.Engine;
 using Spark.Engine.Core;
 using Spark.Engine.Interfaces;
+using Spark.Engine.Search;
 using Spark.Engine.Store.Interfaces;
 
 namespace Spark.Store.PostgreSQL.Extensions;
@@ -50,6 +51,8 @@ public static class IServiceCollectionExtensions
         services.TryAddSingleton<IIndexStore>(provider => new PostgresIndexStore(
             provider.GetRequiredService<NpgsqlDataSource>(), provider.GetRequiredService<IFhirModel>()));
         services.TryAddTransient<IFhirIndex>(provider => new PostgresFhirIndex(
-            provider.GetRequiredService<NpgsqlDataSource>(), provider.GetRequiredService<IFhirModel>()));
+            provider.GetRequiredService<NpgsqlDataSource>(),
+            provider.GetRequiredService<IFhirModel>(),
+            provider.GetService<IReferenceNormalizationService>()));
     }
 }

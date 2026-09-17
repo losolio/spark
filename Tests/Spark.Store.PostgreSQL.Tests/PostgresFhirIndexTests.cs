@@ -8,6 +8,7 @@ using Hl7.Fhir.Model;
 using Hl7.Fhir.Rest;
 using Npgsql;
 using Spark.Engine.Core;
+using Spark.Engine.Search;
 using Spark.Store.PostgreSQL.Tests.Search;
 using System;
 using System.Linq;
@@ -284,10 +285,65 @@ public class PostgresFhirIndexTests : IAsyncLifetime
     }
 
     [Theory]
+    [InlineData("subject=Patient/pa", "o1")]
+    [InlineData("subject=pa", "o1,o5")]
+    [InlineData("subject:Patient=pa", "o1")]
+    [InlineData("subject:Group=Patient/pa", "")]
+    [InlineData("subject=Patient/pa/_history/3", "o1")]
+    [InlineData("subject=Patient/pa,Patient/pb", "o1,o2")]
+    [InlineData("subject=http://other.example.org/fhir/Patient/9", "o4")]
+    [InlineData("subject=http://localhost/fhir/Patient/pa", "o1")]
+    [InlineData("subject:identifier=urn:oid:1|111", "o3")]
+    [InlineData("patient=Patient/pa", "o1")]
+    [InlineData("performer=Practitioner/pr1", "o2")]
+    [InlineData("performer:missing=true", "o1,o3,o4,o5")]
+    [InlineData("subject:Patient.name=hansen", "o1")]
+    [InlineData("subject.name=olsen", "o2")]
+    [InlineData("subject._id=pb", "o2")]
+    [InlineData("patient.identifier=urn:oid:1|111", "o1")]
+    [InlineData("subject:Patient.general-practitioner.name=legesen", "o1")]
+    [InlineData("subject:Patient.general-practitioner:Practitioner._id=pr1", "o1")]
+    public async Task SearchAsync_ByReference_MatchesTargetUrlIdentifierOrChain(string parameter, string expected)
+    {
+        await AddReferenceDataAsync();
+        PostgresFhirIndex index = new(_fixture.DataSource, _fixture.FhirModel,
+            new ReferenceNormalizationService(new Localhost(new Uri("http://localhost/fhir"))));
+        string[] nameAndValue = parameter.Split('=', 2);
+
+        SearchResults results = await index.SearchAsync("Observation", new SearchParams().Add(nameAndValue[0], nameAndValue[1]));
+
+        Assert.Equal(
+            expected.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(id => $"Observation/{id}/_history/1"),
+            results.Order());
+    }
+
+    [Fact]
+    public async Task SearchAsync_ChainWithUnknownParameter_IsIgnoredWithWarning()
+    {
+        await AddReferenceDataAsync();
+
+        SearchResults results = await _index.SearchAsync("Observation", new SearchParams().Add("subject.no-such-parameter", "x"));
+
+        Assert.Equal(5, results.Count);
+        Assert.Equal(OperationOutcome.IssueSeverity.Warning, Assert.Single(results.Outcome.Issue).Severity);
+    }
+
+    [Fact]
+    public async Task SearchAsync_ByReferenceToResourceCreatedLater_MatchesIt()
+    {
+        await AddIndexedAsync(CreateObservation("o1", "Patient/later"));
+        await AddIndexedAsync(CreatePatient("later", "Later"));
+
+        SearchResults results = await _index.SearchAsync("Observation", new SearchParams().Add("subject.name", "later"));
+
+        Assert.Equal(["Observation/o1/_history/1"], results);
+    }
+
+    [Theory]
     [InlineData("birthdate", "2000-01-01")]
     [InlineData("gender:text", "female")]
     [InlineData("family:missing-modifier", "x")]
-    [InlineData("general-practitioner.name", "x")]
+    [InlineData("general-practitioner:unknown-modifier", "x")]
     public async Task SearchAsync_ParameterNotImplemented_ThrowsNotImplemented(string name, string value)
     {
         SparkException exception = await Assert.ThrowsAsync<SparkException>(
@@ -359,10 +415,52 @@ public class PostgresFhirIndexTests : IAsyncLifetime
         Assert.Equal(0L, await command.ExecuteScalarAsync(TestContext.Current.CancellationToken));
     }
 
-    private async Task AddIndexedAsync(Patient patient)
+    private async Task AddIndexedAsync(Resource resource)
     {
-        await AddAsync(patient, "1", Now);
-        await _indexStore.SaveAsync(await _indexer.IndexAsync(patient, patient.Id));
+        await AddAsync(resource, "1", Now);
+        await _indexStore.SaveAsync(await _indexer.IndexAsync(resource, resource.Id));
+    }
+
+    /// <summary>
+    /// Observations o1 to o5 with subjects Patient/pa, Patient/pb, a patient identifier, a URL of another server
+    /// and Group/pa. Patient pa is named Hansen, has identifier urn:oid:1|111 and general practitioner pr1 named
+    /// Legesen, who performed o2 for Patient pb named Olsen.
+    /// </summary>
+    private async Task AddReferenceDataAsync()
+    {
+        Practitioner practitioner = new() { Id = "pr1" };
+        practitioner.Name.Add(new HumanName { Family = "Legesen" });
+        Patient pa = CreatePatient("pa", "Hansen");
+        pa.Identifier.Add(new Identifier("urn:oid:1", "111"));
+        pa.GeneralPractitioner.Add(new ResourceReference("Practitioner/pr1"));
+        Group group = new() { Id = "pa", Type = Group.GroupType.Person, Actual = true, Name = "Hansen family" };
+
+        await AddIndexedAsync(practitioner);
+        await AddIndexedAsync(pa);
+        await AddIndexedAsync(CreatePatient("pb", "Olsen"));
+        await AddIndexedAsync(group);
+
+        Observation o2 = CreateObservation("o2", "Patient/pb");
+        o2.Performer.Add(new ResourceReference("Practitioner/pr1"));
+        Observation o3 = CreateObservation("o3", null);
+        o3.Subject = new ResourceReference { Identifier = new Identifier("urn:oid:1", "111") };
+
+        await AddIndexedAsync(CreateObservation("o1", "Patient/pa"));
+        await AddIndexedAsync(o2);
+        await AddIndexedAsync(o3);
+        await AddIndexedAsync(CreateObservation("o4", "http://other.example.org/fhir/Patient/9"));
+        await AddIndexedAsync(CreateObservation("o5", "Group/pa"));
+    }
+
+    private static Observation CreateObservation(string id, string subject)
+    {
+        return new Observation
+        {
+            Id = id,
+            Status = ObservationStatus.Final,
+            Code = new CodeableConcept("http://loinc.org", "2339-0"),
+            Subject = subject == null ? null : new ResourceReference(subject),
+        };
     }
 
     private static Patient CreatePatient(string id, string family, string given = null)
