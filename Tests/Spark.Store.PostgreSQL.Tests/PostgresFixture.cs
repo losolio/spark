@@ -75,6 +75,15 @@ public sealed class PostgresFixture : IAsyncLifetime
     /// </summary>
     public async Task<NpgsqlDataSource> CreateDatabaseAsync(string prefix)
     {
+        return NpgsqlDataSource.Create(await CreateDatabaseConnectionStringAsync(prefix));
+    }
+
+    /// <summary>
+    /// Creates a new, empty database in the container and returns a connection string for it, including
+    /// the password that <see cref="NpgsqlDataSource.ConnectionString"/> leaves out.
+    /// </summary>
+    public async Task<string> CreateDatabaseConnectionStringAsync(string prefix)
+    {
         string databaseName = $"{prefix}_{Guid.NewGuid():N}";
 
         await using (NpgsqlCommand command = DataSource.CreateCommand($"CREATE DATABASE \"{databaseName}\""))
@@ -87,6 +96,6 @@ public sealed class PostgresFixture : IAsyncLifetime
             Database = databaseName
         };
 
-        return NpgsqlDataSource.Create(builder.ConnectionString);
+        return builder.ConnectionString;
     }
 }
