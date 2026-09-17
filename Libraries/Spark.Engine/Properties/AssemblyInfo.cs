@@ -19,3 +19,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Spark.Engine.STU3")]
 [assembly: InternalsVisibleTo("Spark.Engine.STU3.Tests")]
 [assembly: InternalsVisibleTo("Spark.Store.MongoDB")]
+[assembly: InternalsVisibleTo("Spark.Store.PostgreSQL")]
