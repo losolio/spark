@@ -10,6 +10,7 @@ using Npgsql;
 using Spark.Engine.Core;
 using Spark.Store.PostgreSQL.Tests.Search;
 using System;
+using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 using Xunit;
@@ -112,6 +113,59 @@ public class PostgresFhirIndexTests : IAsyncLifetime
         SearchResults results = await _index.SearchAsync("Patient", searchParams);
 
         Assert.Equal(["Patient/p2/_history/1", "Patient/p1/_history/1"], results);
+    }
+
+    [Theory]
+    [InlineData("_lastUpdated", "2026-09-17", "p2")]
+    [InlineData("_lastUpdated", "eq2026-09-17", "p2")]
+    [InlineData("_lastUpdated", "ap2026-09-17", "p2")]
+    [InlineData("_lastUpdated", "ne2026-09-17", "p1,p3")]
+    [InlineData("_lastUpdated", "gt2026-09-17", "p3")]
+    [InlineData("_lastUpdated", "sa2026-09-17", "p3")]
+    [InlineData("_lastUpdated", "ge2026-09-17", "p2,p3")]
+    [InlineData("_lastUpdated", "lt2026-09-17", "p1")]
+    [InlineData("_lastUpdated", "eb2026-09-17", "p1")]
+    [InlineData("_lastUpdated", "le2026-09-17", "p1,p2")]
+    [InlineData("_lastUpdated", "2026-09", "p1,p2,p3")]
+    [InlineData("_lastUpdated", "gt1900-01-01", "p1,p2,p3")]
+    [InlineData("_lastUpdated", "2026-09-17T12:00:00Z", "p2")]
+    [InlineData("_lastUpdated", "2026-09-17T12:00:01Z", "")]
+    [InlineData("_lastUpdated", "2026-09-16,2026-09-18", "p1,p3")]
+    [InlineData("_lastUpdated:missing", "true", "")]
+    [InlineData("_lastUpdated:missing", "false", "p1,p2,p3")]
+    public async Task SearchAsync_ByLastUpdated_ComparesWithPrecisionOfValue(string name, string value, string expected)
+    {
+        await AddAsync("Patient", "p1", "1", Now.AddDays(-1));
+        await AddAsync("Patient", "p2", "1", Now);
+        await AddAsync("Patient", "p3", "1", Now.AddDays(1));
+
+        SearchResults results = await _index.SearchAsync("Patient", new SearchParams().Add(name, value));
+
+        Assert.Equal(
+            expected.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(id => $"Patient/{id}/_history/1"),
+            results.Order());
+    }
+
+    [Fact]
+    public async Task SearchAsync_ByLastUpdatedAndId_CombinesCriteria()
+    {
+        await AddAsync("Patient", "p1", "1", Now.AddDays(-1));
+        await AddAsync("Patient", "p2", "1", Now);
+
+        SearchResults results = await _index.SearchAsync("Patient",
+            new SearchParams().Add("_lastUpdated", "ge2026-09-16").Add("_id", "p2"));
+
+        Assert.Equal(["Patient/p2/_history/1"], results);
+        Assert.Equal(2, results.UsedCriteria.Count);
+    }
+
+    [Fact]
+    public async Task SearchAsync_ByInvalidLastUpdated_ThrowsBadRequest()
+    {
+        SparkException exception = await Assert.ThrowsAsync<SparkException>(
+            () => _index.SearchAsync("Patient", new SearchParams().Add("_lastUpdated", "not-a-date")));
+
+        Assert.Equal(HttpStatusCode.BadRequest, exception.StatusCode);
     }
 
     [Fact]

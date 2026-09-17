@@ -30,7 +30,7 @@ namespace Spark.Store.PostgreSQL;
 /// than ignored, since ignoring them would widen the result, for example making a conditional create match
 /// every resource of the type.
 /// </remarks>
-// TODO: Only searching by type and _id, and sorting by _lastUpdated, is implemented so far.
+// TODO: Only searching by type, _id and _lastUpdated, and sorting by _lastUpdated, is implemented so far.
 public class PostgresFhirIndex : IFhirIndex
 {
     private readonly NpgsqlDataSource _dataSource;
@@ -133,29 +133,70 @@ public class PostgresFhirIndex : IFhirIndex
                 continue;
             }
 
-            AddCriterium(query, resourceType, criterium);
+            AddCriterium(query, criterium);
             results.UsedCriteria.Add(criterium);
         }
 
         return query;
     }
 
-    private static void AddCriterium(Query query, string resourceType, Criterium criterium)
+    private static void AddCriterium(Query query, Criterium criterium)
     {
-        if (criterium.ParamName == "_id" && criterium.Modifier == null && criterium.Operator is Operator.EQ or Operator.IN)
+        switch (criterium.ParamName)
         {
-            string[] ids = criterium.Operand is ChoiceValue choice
-                ? choice.Choices.Select(id => id.ToUnescapedString()).ToArray()
-                : [((ValueExpression)criterium.Operand).ToUnescapedString()];
+            case "_id" when criterium.Modifier == null && criterium.Operator is Operator.EQ or Operator.IN:
+                string[] ids = criterium.Operand is ChoiceValue choice
+                    ? choice.Choices.Select(id => id.ToUnescapedString()).ToArray()
+                    : [((ValueExpression)criterium.Operand).ToUnescapedString()];
+                query.Add($"r.resource_key IN (SELECT k.id FROM {Table.ResourceKeys} k WHERE k.type = @type AND k.resource_id = ANY(@{query.AddParameter(ids)}))");
+                return;
 
-            string parameter = query.NextParameterName();
-            query.Add(
-                $"r.resource_key IN (SELECT k.id FROM {Table.ResourceKeys} k WHERE k.type = @type AND k.resource_id = ANY(@{parameter}))",
-                (parameter, ids));
-            return;
+            case "_lastUpdated" when criterium.Modifier == null:
+                query.Add(GetLastUpdatedClause(query, criterium));
+                return;
         }
 
         throw NotImplemented($"Search parameter {criterium} is not implemented yet for the PostgreSQL store.");
+    }
+
+    /// <summary>
+    /// The last updated time of a resource is an instant, while a search value covers a range that depends on
+    /// its precision: 2026-09 is all of September. The range is compared as [lower bound, upper bound).
+    /// </summary>
+    private static string GetLastUpdatedClause(Query query, Criterium criterium)
+    {
+        return criterium.Operator switch
+        {
+            // Every resource has a last updated time.
+            Operator.ISNULL => "FALSE",
+            Operator.NOTNULL => "TRUE",
+            Operator.IN => "(" + string.Join(" OR ", ((ChoiceValue)criterium.Operand).Choices
+                .Select(value => GetLastUpdatedClause(query, Operator.EQ, value))) + ")",
+            _ => GetLastUpdatedClause(query, criterium.Operator, (ValueExpression)criterium.Operand),
+        };
+    }
+
+    private static string GetLastUpdatedClause(Query query, Operator comparator, ValueExpression operand)
+    {
+        string text = operand.ToUnescapedString();
+        if (!FhirDateTime.IsValidValue(text))
+            throw Error.BadRequest($"'{text}' is not a valid value for _lastUpdated.");
+
+        FhirDateTime value = new(text);
+        string lower = query.AddParameter(value.LowerBound().UtcDateTime);
+        string upper = query.AddParameter(value.UpperBound().UtcDateTime);
+
+        return comparator switch
+        {
+            // Like the MongoDB store, ap is treated as eq.
+            Operator.EQ or Operator.APPROX => $"(r.updated_at >= @{lower} AND r.updated_at < @{upper})",
+            Operator.NOT_EQUAL => $"(r.updated_at < @{lower} OR r.updated_at >= @{upper})",
+            Operator.GT or Operator.STARTS_AFTER => $"r.updated_at >= @{upper}",
+            Operator.GTE => $"r.updated_at >= @{lower}",
+            Operator.LT or Operator.ENDS_BEFORE => $"r.updated_at < @{lower}",
+            Operator.LTE => $"r.updated_at < @{upper}",
+            _ => throw NotImplemented($"The {comparator} comparator is not implemented for _lastUpdated."),
+        };
     }
 
     private static string GetOrderBy(SearchParams searchCommand)
@@ -185,12 +226,21 @@ public class PostgresFhirIndex : IFhirIndex
 
         public string Filter => string.Join(" AND ", _clauses);
 
-        public string NextParameterName() => $"p{Parameters.Count}";
-
-        public void Add(string clause, (string Name, object Value) parameter)
+        public void Add(string clause, params (string Name, object Value)[] parameters)
         {
             _clauses.Add(clause);
-            Parameters.Add(new NpgsqlParameter(parameter.Name, parameter.Value));
+            foreach ((string name, object value) in parameters)
+            {
+                Parameters.Add(new NpgsqlParameter(name, value));
+            }
+        }
+
+        /// <summary>Adds a parameter with a generated name and returns the name.</summary>
+        public string AddParameter(object value)
+        {
+            string name = $"p{Parameters.Count}";
+            Parameters.Add(new NpgsqlParameter(name, value));
+            return name;
         }
     }
 }
