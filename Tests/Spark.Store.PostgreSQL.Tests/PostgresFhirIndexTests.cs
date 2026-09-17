@@ -499,6 +499,47 @@ public class PostgresFhirIndexTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CountAsync_WithSingleCriterium_CountsFromSearchIndex()
+    {
+        Patient p1 = CreatePatient("p1", "Hansen");
+        p1.Gender = AdministrativeGender.Female;
+        Patient p2 = CreatePatient("p2", "Olsen");
+        p2.Gender = AdministrativeGender.Female;
+        Patient p3 = CreatePatient("p3", "Nilsen");
+        p3.Gender = AdministrativeGender.Male;
+        await AddIndexedAsync(p1);
+        await AddIndexedAsync(p2);
+        await AddIndexedAsync(p3);
+
+        Assert.Equal(2, await _index.CountAsync("Patient", new SearchParams().Add("gender", "female")));
+        Assert.Equal(1, await _index.CountAsync("Patient", new SearchParams().Add("family", "nil")));
+        Assert.Equal(0, await _index.CountAsync("Patient", new SearchParams().Add("gender", "other")));
+    }
+
+    [Fact]
+    public async Task CountAsync_CountsResourceOnceWhenSeveralValuesMatch()
+    {
+        Patient patient = CreatePatient("p1", "Hansen");
+        patient.Name.Add(new HumanName { Family = "Hansen-Olsen" });
+        await AddIndexedAsync(patient);
+
+        // Both names match, but the patient is one match.
+        Assert.Equal(1, await _index.CountAsync("Patient", new SearchParams().Add("family", "hansen")));
+    }
+
+    [Fact]
+    public async Task CountAsync_ExcludesDeletedResources()
+    {
+        Patient patient = CreatePatient("p1", "Hansen");
+        patient.Gender = AdministrativeGender.Female;
+        await AddIndexedAsync(patient);
+        await _store.AddAsync(Entry.DELETE(Key.Create("Patient", "p1", "2"), Now));
+        await _indexStore.DeleteAsync(Entry.DELETE(Key.Create("Patient", "p1", "2"), Now));
+
+        Assert.Equal(0, await _index.CountAsync("Patient", new SearchParams().Add("gender", "female")));
+    }
+
+    [Fact]
     public async Task FindSingleAsync_ReturnsKeyOfOnlyMatch()
     {
         await AddAsync("Patient", "p1", "1", Now);

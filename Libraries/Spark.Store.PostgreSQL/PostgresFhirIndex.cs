@@ -92,9 +92,9 @@ public partial class PostgresFhirIndex : IFhirIndex
         ArgumentException.ThrowIfNullOrEmpty(resource);
         ArgumentNullException.ThrowIfNull(searchCommand);
 
-        Query query = CreateQuery(resource, searchCommand, new SearchResults());
+        Query query = CreateCountQuery(resource, searchCommand) ?? CreateQuery(resource, searchCommand, new SearchResults());
 
-        await using NpgsqlCommand command = _dataSource.CreateCommand(
+        await using NpgsqlCommand command = _dataSource.CreateCommand(query.Sql ??
             $"SELECT count(*) FROM {Table.Resources} r WHERE {query.Filter}");
         command.Parameters.AddRange(query.Parameters.ToArray());
         return (long)await command.ExecuteScalarAsync().ConfigureAwait(false);
@@ -156,6 +156,39 @@ public partial class PostgresFhirIndex : IFhirIndex
     }
 
     /// <summary>
+    /// A count of a single criterium is taken from the search index table itself, which holds rows for the current,
+    /// not deleted versions only, so that the resources table does not have to be read at all. Returns null when the
+    /// search is anything else.
+    /// </summary>
+    private Query CreateCountQuery(string resourceType, SearchParams searchCommand)
+    {
+        if (searchCommand.Parameters.Count != 1)
+            return null;
+
+        (string name, string value) = searchCommand.Parameters[0];
+        Criterium criterium = Criterium.Parse(_fhirModel.SearchParameters, resourceType, name, value);
+        if (criterium == null || criterium.Operator is not (Operator.EQ or Operator.IN) || criterium.Modifier != null)
+            return null;
+
+        // _id and _lastUpdated are answered from the resources table, not from the search index.
+        if (criterium.ParamName is "_id" or "_lastUpdated")
+            return null;
+
+        SearchParameter searchParameter = _fhirModel.FindSearchParameter(resourceType, criterium.ParamName);
+        if (searchParameter == null || !TryGetIndexTable(criterium, searchParameter, out string table, out var getCondition))
+            return null;
+
+        Query query = new();
+        string type = query.AddParameter(resourceType);
+        query.Sql =
+            $"SELECT count(DISTINCT i.resource_key) FROM {table} i WHERE i.param_id = " +
+            $"(SELECT p.id FROM {Table.SearchParams} p WHERE p.resource_type = @{type} " +
+            $"AND p.code = @{query.AddParameter(criterium.ParamName)}) " +
+            $"AND ({GetMatches(criterium, getCondition(query))})";
+        return query;
+    }
+
+    /// <summary>
     /// Whether the parameter is defined for the resource type and, for a chain, whether every link of the chain
     /// is defined for at least one of the resource types it can point to.
     /// </summary>
@@ -201,29 +234,57 @@ public partial class PostgresFhirIndex : IFhirIndex
         {
             switch (searchParameter.Type)
             {
-                case SearchParamType.Token when criterium.Modifier is null or "not":
-                    return GetIndexClause(query, scope, criterium, Table.SearchToken,
-                        value => GetTokenCondition(query, value, "i.system", "i.code"));
-
-                case SearchParamType.String when criterium.Modifier is null or "exact" or "contains":
-                    return GetIndexClause(query, scope, criterium, Table.SearchString,
-                        value => GetStringCondition(query, criterium.Modifier, value));
-
-                case SearchParamType.Reference when criterium.Modifier is null or "identifier" || _resourceTypes.Contains(criterium.Modifier):
-                    return GetIndexClause(query, scope, criterium, Table.SearchReference,
-                        value => GetReferenceCondition(query, criterium, searchParameter, value));
-
-                case SearchParamType.Quantity when criterium.Modifier is null:
-                    return GetIndexClause(query, scope, criterium, Table.SearchQuantity,
-                        (comparator, value) => GetQuantityCondition(query, comparator, value));
-
-                case SearchParamType.Date when criterium.Modifier is null:
-                    return GetIndexClause(query, scope, criterium, Table.SearchDate,
-                        (comparator, value) => GetDateCondition(query, comparator, value));
+                case SearchParamType.Token or SearchParamType.String or SearchParamType.Reference
+                    or SearchParamType.Quantity or SearchParamType.Date
+                    when TryGetIndexTable(criterium, searchParameter, out string table, out var getCondition):
+                    return GetIndexClause(query, scope, criterium, table, getCondition(query));
             }
         }
 
         throw NotImplemented($"Search parameter {criterium} is not implemented yet for the PostgreSQL store.");
+    }
+
+    /// <summary>
+    /// The search index table a criterium is answered from, and how one of its values becomes a condition on a row
+    /// of that table (aliased i). False when the type of the parameter or the modifier is not supported.
+    /// </summary>
+    private bool TryGetIndexTable(
+        Criterium criterium,
+        SearchParameter searchParameter,
+        out string table,
+        out Func<Query, Func<Operator, string, string>> getCondition)
+    {
+        switch (searchParameter.Type)
+        {
+            case SearchParamType.Token when criterium.Modifier is null or "not":
+                table = Table.SearchToken;
+                getCondition = query => (_, value) => GetTokenCondition(query, value, "i.system", "i.code");
+                return true;
+
+            case SearchParamType.String when criterium.Modifier is null or "exact" or "contains":
+                table = Table.SearchString;
+                getCondition = query => (_, value) => GetStringCondition(query, criterium.Modifier, value);
+                return true;
+
+            case SearchParamType.Reference when criterium.Modifier is null or "identifier" || _resourceTypes.Contains(criterium.Modifier):
+                table = Table.SearchReference;
+                getCondition = query => (_, value) => GetReferenceCondition(query, criterium, searchParameter, value);
+                return true;
+
+            case SearchParamType.Quantity when criterium.Modifier is null:
+                table = Table.SearchQuantity;
+                getCondition = query => (comparator, value) => GetQuantityCondition(query, comparator, value);
+                return true;
+
+            case SearchParamType.Date when criterium.Modifier is null:
+                table = Table.SearchDate;
+                getCondition = query => (comparator, value) => GetDateCondition(query, comparator, value);
+                return true;
+        }
+
+        table = null;
+        getCondition = null;
+        return false;
     }
 
     /// <summary>
@@ -611,6 +672,9 @@ public partial class PostgresFhirIndex : IFhirIndex
         public List<NpgsqlParameter> Parameters { get; } = [];
 
         public string Filter { get; set; }
+
+        /// <summary>The complete statement, when the query is not a filter on the resources table.</summary>
+        public string Sql { get; set; }
 
         /// <summary>Adds a parameter with a generated name and returns the name.</summary>
         public string AddParameter(object value)
